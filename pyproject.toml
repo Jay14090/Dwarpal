@@ -7,12 +7,19 @@ requires-python = ">=3.11,<3.12"
 dependencies = [
     "alembic>=1.20.0",
     "fastapi>=0.142.2",
+    "huggingface-hub>=2.1.1",
+    "lap>=0.5.13",
+    "numpy>=2.4.6",
+    "opencv-python>=5.0.0.93",
     "pgvector>=0.5.0",
     "psycopg[binary]>=3.3.6",
     "pydantic>=2.13.5",
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
     "sqlalchemy>=2",
+    "torch>=2.14.1",
+    "torchvision>=0.29.1",
+    "ultralytics>=8.4.173",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -30,7 +37,7 @@ src = ["backend", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ANN"]
-ignore = ["ANN401"]
+ignore = ["ANN401", "E501"]  # formatter owns line length
 
 [tool.ruff.lint.per-file-ignores]
 "backend/tests/**" = ["ANN"]

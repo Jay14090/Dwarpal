@@ -108,6 +108,31 @@ class LLMSettings(StrictModel):
         return bool(self.provider and self.model)
 
 
+class SmartSpacesSettings(StrictModel):
+    repo_id: str = "nvidia/PhysicalAI-SmartSpaces"
+    scene: str = "MTMC_Tracking_2024/test/scene_071"
+    num_cameras: int = Field(6, ge=1, le=16)
+    exclude_cameras: list[int] = Field(default_factory=list)
+    max_seconds: float | None = Field(None, gt=0)
+
+
+class MevaSettings(StrictModel):
+    bucket: str = "s3://mevadata-public-01"
+    video_prefix: str
+    annotation_prefix: str
+    clip_prefix: str
+    cameras: list[str] = Field(min_length=1)
+    max_seconds: float | None = Field(None, gt=0)
+
+
+class DatasetSettings(StrictModel):
+    max_height: int = Field(720, ge=144)
+    crf: int = Field(23, ge=0, le=51)
+    download_confirm_gb: float = Field(20.0, gt=0)
+    smartspaces: SmartSpacesSettings = SmartSpacesSettings()
+    meva: MevaSettings
+
+
 class Settings(StrictModel):
     app: AppSettings = AppSettings()
     server: ServerSettings = ServerSettings()
@@ -119,6 +144,7 @@ class Settings(StrictModel):
     identity: IdentitySettings
     privacy: PrivacySettings = PrivacySettings()
     llm: LLMSettings = LLMSettings()
+    datasets: DatasetSettings
 
 
 # --------------------------------------------------------------------------- cameras.yaml
@@ -145,6 +171,8 @@ class Camera(StrictModel):
     source_uri: str
     run_mode: Literal["realtime", "cached"] = "realtime"
     enabled: bool = True
+    # Processed dataset this camera comes from (GT + calibration under processed_dir/<dataset>/).
+    dataset: str | None = None
     zones: list[Zone] = Field(default_factory=list)
     calibration: dict[str, Any] | None = None
 

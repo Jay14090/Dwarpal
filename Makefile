@@ -8,7 +8,7 @@ PORT    ?= 8000
 
 .DEFAULT_GOAL := help
 .PHONY: help setup env infra-up infra-down infra-logs migrate dev test lint fmt \
-        streams index demo eval clean
+        data data-meva data-smartspaces inspect streams streams-stop index demo eval clean
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -50,8 +50,25 @@ fmt: ## Auto-fix lint and format
 	$(RUN) ruff check --fix .
 	$(RUN) ruff format .
 
-streams: ## (P1) Serve looped dataset videos as RTSP via MediaMTX
-	@echo "make streams lands in P1 (scripts/stream_cameras.sh)"; exit 1
+data: data-meva data-smartspaces ## Download + adapt both datasets (lists sizes first)
+
+data-meva: ## Download the MEVA subset (~0.5 GB) and convert to data/processed/meva
+	scripts/download_meva.sh
+	$(RUN) python scripts/adapt_meva.py
+
+data-smartspaces: ## Download the SmartSpaces scene subset (~1.2 GB) and convert it
+	$(RUN) python scripts/download_smartspaces.py
+	$(RUN) python scripts/adapt_smartspaces.py
+	$(RUN) python scripts/register_cameras.py smartspaces
+
+inspect: ## Print cameras, durations and identity counts of processed datasets
+	$(RUN) python scripts/inspect_dataset.py
+
+streams: infra-up ## Loop every processed video as RTSP (rtsp://localhost:8554/<camera>)
+	scripts/stream_cameras.sh start
+
+streams-stop: ## Stop the RTSP loopers
+	scripts/stream_cameras.sh stop
 
 index: ## (P2/P3) Precompute detections for cached-mode cameras
 	@echo "make index lands in P2/P3"; exit 1

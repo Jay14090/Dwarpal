@@ -57,3 +57,22 @@ llm:
   model: ""
   api_key: ""
   timeout_s: 10
+
+# Dataset subsets and the common processed format (P1). See docs/progress.md D11-D16.
+datasets:
+  max_height: 720            # adapters downscale to this height (boxes/calibration rescaled)
+  crf: 23                    # x264 quality for processed videos
+  download_confirm_gb: 20    # downloads above this need --yes (CLAUDE.md download rules)
+  smartspaces:
+    repo_id: nvidia/PhysicalAI-SmartSpaces
+    scene: MTMC_Tracking_2024/test/scene_071   # retail, 16 cameras, people only
+    num_cameras: 6
+    exclude_cameras: [649]                     # corrupt video per dataset README
+    max_seconds: null
+  meva:
+    bucket: s3://mevadata-public-01
+    video_prefix: drops-123-r13/2018-03-11/13
+    annotation_prefix: examples/annotations/2018-03-11/13
+    clip_prefix: "2018-03-11.13-50"
+    cameras: [school.G328, school.G336, school.G339]   # parking, school exterior/road, parking PTZ
+    max_seconds: null

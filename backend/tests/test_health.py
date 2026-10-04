@@ -22,7 +22,7 @@ def test_health_reports_db_down(config):
     assert body["database"]["status"] == "down"
     assert body["version"]
     assert body["device"] in {"cuda", "mps", "cpu"}
-    assert body["cameras"] == 1
+    assert body["cameras"] == sum(c.enabled for c in config.cameras.cameras)
 
 
 @pytest.mark.db

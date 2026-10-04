@@ -1,12 +1,16 @@
 # Camera registry. `id` is a slug used in URLs, events and the RTSP path.
 # source_type: file | rtsp | webcam
-#   file   -> source_uri is a path to a video (looped)
-#   rtsp   -> source_uri is an RTSP URL (dataset cameras via MediaMTX, or the Windows webcam publisher)
-#   webcam -> source_uri is an OpenCV device index, e.g. "0" (native Linux only; not available in WSL2)
+#   file   -> source_uri is a video path (relative to the repo root), looped at native fps.
+#             Cached-mode dataset cameras use this so frame indices match cached detections (D16).
+#   rtsp   -> source_uri is an RTSP URL (MediaMTX, or the Windows webcam publisher)
+#   webcam -> source_uri is an OpenCV device index, e.g. "0" (native Linux only; not in WSL2)
 # run_mode: realtime | cached (cached replays precomputed detections from `make index`)
-# Zone polygons use normalized [x, y] in [0, 1] (top-left origin).
+# dataset: processed dataset name; GT and calibration are read from data/processed/<dataset>/.
+# Zone polygons use normalized [x, y] in [0, 1] (top-left origin). restricted zones trigger
+# unknown-person rules.
 #
-# Dataset cameras (4 x SmartSpaces / MEVA) are added in P1 once the subsets are chosen.
+# SmartSpaces cameras are appended by `scripts/register_cameras.py smartspaces` after the
+# dataset is downloaded and adapted (camera ids depend on the auto-selection).
 
 cameras:
   - id: webcam
@@ -19,4 +23,43 @@ cameras:
       - name: lobby
         restricted: true
         polygon: [[0.05, 0.05], [0.95, 0.05], [0.95, 0.95], [0.05, 0.95]]
+    calibration: null
+
+  - id: meva_g336
+    name: Main gate drive
+    source_type: file
+    source_uri: data/processed/meva/meva_g336.mp4
+    run_mode: cached
+    enabled: true
+    dataset: meva
+    zones:
+      - name: gate_drive
+        restricted: false
+        polygon: [[0.0, 0.42], [1.0, 0.42], [1.0, 1.0], [0.0, 1.0]]
+    calibration: null
+
+  - id: meva_g328
+    name: Resident parking
+    source_type: file
+    source_uri: data/processed/meva/meva_g328.mp4
+    run_mode: cached
+    enabled: true
+    dataset: meva
+    zones:
+      - name: resident_parking
+        restricted: true
+        polygon: [[0.0, 0.48], [0.87, 0.48], [0.87, 0.88], [0.0, 0.88]]
+    calibration: null
+
+  - id: meva_g339
+    name: Visitor parking
+    source_type: file
+    source_uri: data/processed/meva/meva_g339.mp4
+    run_mode: cached
+    enabled: false
+    dataset: meva
+    zones:
+      - name: visitor_parking
+        restricted: false
+        polygon: [[0.0, 0.1], [1.0, 0.1], [1.0, 1.0], [0.0, 1.0]]
     calibration: null

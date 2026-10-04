@@ -4,7 +4,7 @@ AI security operator for gated communities: multi-camera person tracking with cr
 global IDs, resident/staff/unknown labeling, Indian ANPR, real-time alerts and natural-language
 footage search, built privacy-first.
 
-> Status: **P0 (setup)** complete. See [`docs/progress.md`](docs/progress.md) for the phase log
+> Status: **P0-P1** complete (see progress log for what is held). See [`docs/progress.md`](docs/progress.md) for the phase log
 > and decisions, and [`CLAUDE.md`](CLAUDE.md) for the full spec.
 
 ## Prerequisites (Windows 11 + WSL2)
@@ -31,6 +31,26 @@ make help      # all targets
 
 `/health` returns `"status": "ok"` when the DB is reachable, pgvector is installed and
 migrations are applied; otherwise `"degraded"` with details.
+
+## Data (P1)
+
+```bash
+make data-meva          # MEVA outdoor subset: ~0.5 GB from the public S3 bucket (needs `aws` CLI)
+make data-smartspaces   # SmartSpaces retail scene: ~1.2 GB from Hugging Face (HF_TOKEN if gated)
+make inspect            # cameras, durations, identity counts
+uv run python scripts/render_gt_overlay.py meva meva_g336   # 10 s GT overlay -> data/clips/
+make streams            # loop every processed video as rtsp://localhost:8554/<camera>
+```
+
+Open any stream in VLC: *Media → Open Network Stream → `rtsp://localhost:8554/meva_g336`*.
+
+**Webcam on Windows + WSL2:** WSL2 cannot see USB webcams, so publish it from Windows:
+`winget install Gyan.FFmpeg`, then in PowerShell from the repo folder
+`.\scripts\webcam_publish.ps1` (or `-List` to choose a camera). The backend reads `rtsp://localhost:8554/webcam`.
+
+**GPU note:** the PyPI `torch` wheels target CUDA 13, which needs a recent Windows NVIDIA driver
+(R580+) and a GTX 16xx/RTX-class GPU. For a GTX 10xx (Pascal) card, run
+`uv pip install --reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu126`.
 
 ## Layout
 
