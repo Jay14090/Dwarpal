@@ -19,10 +19,36 @@ export class ApiError extends Error {
   }
 }
 
+// Who is acting (sent as X-Actor and written to the audit log). Demo-grade identity, not authentication:
+// actors listed in privacy.admin_actors (default "admin") may unblur faces.
+const ACTOR_KEY = "dwarpal.actor";
+
+export function getActor(): string {
+  try {
+    return (typeof window !== "undefined" && window.localStorage.getItem(ACTOR_KEY)) || "operator";
+  } catch {
+    return "operator";
+  }
+}
+
+export function setActor(actor: string): void {
+  try {
+    window.localStorage.setItem(ACTOR_KEY, actor || "operator");
+    window.dispatchEvent(new Event("dwarpal-actor"));
+  } catch {}
+}
+
+/** Fetch an image that needs the X-Actor header (admin unblur) and return an object URL. */
+export async function protectedImage(path: string): Promise<string> {
+  const res = await fetch(`${API_URL}${path}`, { headers: { "X-Actor": getActor() }, cache: "no-store" });
+  if (!res.ok) throw new ApiError(res.status, res.status === 403 ? "admin only" : res.statusText);
+  return URL.createObjectURL(await res.blob());
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
-  headers.set("X-Actor", "operator");
+  headers.set("X-Actor", getActor());
   const res = await fetch(`${API_URL}${path}`, { ...init, headers, cache: "no-store" });
   if (!res.ok) {
     let msg = res.statusText;

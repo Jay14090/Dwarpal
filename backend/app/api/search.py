@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import logging
-import shutil
-import subprocess
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -15,11 +14,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
-from app.api.deps import db_session
+from app.api.deps import actor, db_session
+from app.api.privacy import serve_thumb
+from app.clips import ClipError, blur_fn, cut_clip
 from app.core.config import Config
-from app.datasets.common import probe_video
-from app.db.models import Track
+from app.db.models import GlobalIdentity, Track
+from app.pipeline.cache import TrackCache, cache_path
+from app.privacy import PrivacyPolicy, audit
 from app.search.parser import QueryParser
 from app.search.retrieval import clip_prompt, search
 
@@ -121,45 +124,76 @@ def _track(session: Session, track_id: int) -> Track:
     return t
 
 
+def track_role(session: Session, t: Track) -> str:
+    gi = session.get(GlobalIdentity, t.global_id) if t.global_id is not None else None
+    return (gi.role_state if gi else None) or t.role or "pending"
+
+
 @router.get("/tracks/{track_id}/thumb.jpg")
-def track_thumb(track_id: int, session: Annotated[Session, Depends(db_session)]) -> Response:
+def track_thumb(
+    track_id: int,
+    request: Request,
+    session: Annotated[Session, Depends(db_session)],
+    who: Annotated[str, Depends(actor)],
+    unblur: bool = False,
+) -> Response:
+    """Head blurred unless the person is identified; `?unblur=true` for admins, audited."""
     t = _track(session, track_id)
     if not t.thumb_path or not Path(t.thumb_path).is_file():
         raise HTTPException(404, "no thumbnail")
-    return Response(Path(t.thumb_path).read_bytes(), media_type="image/jpeg")
+    data = serve_thumb(Path(t.thumb_path).read_bytes(), track_role(session, t), request, session,
+                       unblur, who, f"track:{track_id}")  # fmt: skip
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @router.get("/tracks/{track_id}/clip.mp4")
 def track_clip(
-    track_id: int, request: Request, session: Annotated[Session, Depends(db_session)]
+    track_id: int,
+    request: Request,
+    session: Annotated[Session, Depends(db_session)],
+    who: Annotated[str, Depends(actor)],
+    unblur: bool = False,
 ) -> FileResponse:
-    """Cut the track's time window (+1 s padding) from the camera's video file, cached on disk."""
+    """The track's time window (+-1 s) from the camera's video file. Unknown/pending people's heads are
+    blurred (the track's own person too unless identified); `?unblur=true` (admin, audited) is never cached."""
     cfg: Config = request.app.state.config
+    s = cfg.settings
+    pol = PrivacyPolicy(s.privacy)
     t = _track(session, track_id)
     cam = next((c for c in cfg.cameras.cameras if c.id == t.camera_id), None)
     if cam is None or cam.source_type != "file" or t.start_frame is None or t.end_frame is None:
         raise HTTPException(404, "no recording for this track (only file cameras keep video)")
-    out = (
-        cfg.settings.paths.clips_dir
-        / "tracks"
-        / f"{track_id}_{t.camera_id}_{t.start_frame}_{t.end_frame}.mp4"
-    )
+    src = Path(cam.source_uri)
+    src = src if src.is_absolute() else cfg.root_dir / src
+    if not src.is_file():
+        raise HTTPException(404, "source video missing")
+    role = track_role(session, t)
+    blur = None
+    if unblur:
+        if not pol.is_admin(who):
+            raise HTTPException(403, f"{who!r} is not a privacy admin")
+        audit(session, who, "unblur_clip", f"track:{track_id}", role=role)
+        session.commit()
+    elif s.privacy.blur_unknown_faces:
+        cp = cache_path(s.paths.cache_dir, cam.id)
+        if not cp.is_file():
+            raise HTTPException(
+                409, "no cached detections for this camera, so the clip cannot be anonymised"
+            )
+        keep = None if pol.should_blur(role) else t.local_track_id
+        blur = blur_fn(TrackCache(cp), keep)
+    tag = "admin" if unblur else ("b" if blur is not None and pol.should_blur(role) else "k")
+    name = f"{track_id}_{t.camera_id}_{t.start_frame}_{t.end_frame}_{tag}.mp4"
+    out = s.paths.clips_dir / "tracks" / name
+    if unblur:
+        out = s.paths.clips_dir / "tmp" / f"{uuid.uuid4().hex}_{name}"
     if not out.is_file():
-        src = Path(cam.source_uri)
-        src = src if src.is_absolute() else cfg.root_dir / src
-        if not src.is_file() or shutil.which("ffmpeg") is None:
-            raise HTTPException(404, "source video or ffmpeg missing")
-        fps = probe_video(src).fps or 30.0
-        start = max(0.0, t.start_frame / fps - 1.0)
-        dur = min(
-            (t.end_frame - t.start_frame) / fps + 2.0, cfg.settings.index.max_track_seconds + 2.0
-        )
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(".part.mp4")
-        cmd = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-i", str(src), "-t", f"{dur:.2f}",
-               "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-movflags", "+faststart", str(tmp)]  # fmt: skip
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if r.returncode != 0:
-            raise HTTPException(500, f"ffmpeg failed: {r.stderr[-300:]}")
-        tmp.replace(out)
-    return FileResponse(out, media_type="video/mp4")
+        try:
+            cut_clip(src, out, t.start_frame, t.end_frame, blur, max_s=s.index.max_track_seconds + 2.0,
+                     head_fraction=s.privacy.head_fraction)  # fmt: skip
+        except ClipError as exc:
+            raise HTTPException(500, str(exc)) from exc
+    cleanup = BackgroundTask(out.unlink, missing_ok=True) if unblur else None
+    return FileResponse(
+        out, media_type="video/mp4", background=cleanup, headers={"Cache-Control": "no-store"}
+    )

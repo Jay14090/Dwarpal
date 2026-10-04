@@ -21,7 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import actor, db_session
-from app.db.models import AuditLog, Event
+from app.api.privacy import serve_thumb
+from app.db.models import AuditLog, Event, GlobalIdentity
 from app.pipeline.engine import event_thumb_path
 
 log = logging.getLogger(__name__)
@@ -80,11 +81,22 @@ def acknowledge(
 
 
 @router.get("/events/{event_id}/thumb.jpg")
-def event_thumb(event_id: int, request: Request) -> Response:
+def event_thumb(
+    event_id: int,
+    request: Request,
+    session: Annotated[Session, Depends(db_session)],
+    who: Annotated[str, Depends(actor)],
+    unblur: bool = False,
+) -> Response:
+    """Person crop of the alert; head blurred unless the person is identified (admin unblur is audited)."""
     path = event_thumb_path(request.app.state.config.settings.paths.thumbs_dir, event_id)
-    if not path.is_file():
+    e = session.get(Event, event_id)
+    if e is None or not path.is_file():
         raise HTTPException(404, "no thumbnail")
-    return Response(path.read_bytes(), media_type="image/jpeg")
+    gi = session.get(GlobalIdentity, e.global_id) if e.global_id is not None else None
+    role = (gi.role_state if gi else None) or e.payload.get("role") or "pending"
+    data = serve_thumb(path.read_bytes(), role, request, session, unblur, who, f"event:{event_id}")
+    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @router.websocket("/ws/events")

@@ -70,9 +70,14 @@ face:
 
 # Privacy (enforced from P10).
 privacy:
-  blur_unknown_faces: true
-  unknown_retention_days: 7
+  blur_unknown_faces: true          # streams, thumbnails and clips
+  blur_roles: [unknown, pending]    # everyone not identified as a consented, enrolled person
+  head_fraction: 0.24               # top part of the person box that is blurred
+  unknown_retention_days: 7         # embeddings/thumbnails/clips of unknown tracks are deleted after this
+  retention_interval_s: 3600        # how often the API runs the retention job
   require_consent: true
+  admin_actors: [admin]             # X-Actor values allowed to unblur (demo auth; every unblur is audited)
+  unblur_max_s: 300                 # a live-stream unblur expires after this
 
 # Natural-language search parser (P7). Empty provider -> rule-based fallback.
 # provider: anthropic (official SDK; model defaults to claude-opus-5-5) | openai (any

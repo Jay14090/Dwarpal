@@ -545,3 +545,52 @@ No console errors, and no horizontal scroll at 390 px width. Screenshots: `docs/
 - The webcam enrollment flip (unknown → resident) needs your webcam (`scripts/webcam_publish.ps1`).
 - Clip playback was checked with curl + ffprobe (H.264 720p), not in the browser: Playwright's Chromium has no
   H.264 decoder, so check it in your browser.
+
+## P10 Privacy
+
+### Plan
+- `app/privacy.py`:
+  - `head_box`: the top 24 % of the person box, padded.
+  - `blur_heads` / `blur_crop`: pixelate, then Gaussian blur; irreversible on the output.
+  - `PrivacyPolicy`: which roles are blurred, who is an admin.
+  - `run_retention` and `retention_loop`.
+- **Streams:** `CameraWorker._publish` blurs heads of people whose role is in `privacy.blur_roles` (default
+  `unknown`, `pending`) before drawing boxes. An admin can unblur one camera for at most `unblur_max_s`
+  (`POST /privacy/unblur-stream` with a reason → engine `unblur` command, audited).
+- **Thumbnails** (tracks, events): stored once, blurred **when served** from the identity's current role, so
+  enrolling someone later unblurs their history automatically. `?unblur=true` is admin-only (403 otherwise) and
+  audited (`unblur_thumbnail`).
+- **Clips** (`app/clips.py`): decoded frame by frame, heads of every person blurred using the camera's cached
+  detections (the track's own person stays visible only if identified), then piped to ffmpeg H.264. With no
+  detections the clip is refused (409) rather than served unanonymised. Admin `?unblur=true` is audited and the
+  file is deleted after sending.
+- **Retention:** an API background thread (every `retention_interval_s`) plus `POST /privacy/retention` (admin)
+  delete embeddings, thumbnails and clips of unknown/pending tracks, and the person crops of their events, older
+  than `unknown_retention_days` (7). Track rows (camera, time, colours) and alert records stay. Each run writes an
+  audit row with counts.
+- **Consent:** enrollment without consent → 422 on both capture and upload; the gallery loads only consenting
+  people (P4 tests).
+- `GET /audit` (admin). UI: an operator/admin switch in the nav, an eye button on search cards and live tiles
+  (admin), and a privacy & audit card with "Run retention now" on `/registry`.
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D51 | Blur `unknown` **and** `pending` | Pending people haven't been identified as consented residents or staff; blurring only "unknown" would show faces until the state machine decides |
+| D52 | Blur a head region derived from the person box, not detected faces | Faces are 5–20 px at CCTV distance and the face detector misses them; the head region always exists |
+| D53 | Thumbnails are blurred at serve time instead of storing a blurred and a raw copy | One file per thumbnail; the current identity decides; admin unblur needs no second store |
+| D54 | Admin = `X-Actor` in `privacy.admin_actors` | There's no authentication in scope (demo); the header model keeps every action attributable in `audit_log`. Real auth should replace it before any deployment |
+
+### Status
+Done. The tests cover each DoD item (`test_privacy.py`, `test_events_api.py`, `test_people_api.py`):
+- head blur only touches the head;
+- the stream blurs unknown and pending but not residents; the unblur window works and expires;
+- clips are blurred, with the identified person kept;
+- thumbnails are blurred by default; admin unblur is audited and non-admins get 403; enrollment unblurs history;
+- retention deletes only old unknown/pending data, and is audited and admin-gated;
+- the stream-unblur endpoint requires admin;
+- consent is refused on capture and upload, and the gallery loads consenting people only.
+
+In the browser (MEVA gym and cafe): stream heads blurred (`docs/img/p10_stream_blur.jpg`), search thumbnails
+blurred, the admin eye unblurs one card, and the audit log shows the `unblur_thumbnail` row
+(`docs/img/p10_search_blur.jpg`).

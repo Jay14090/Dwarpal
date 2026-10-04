@@ -63,6 +63,7 @@ from app.pipeline.reid import ReidEncoder, build_encoder
 from app.pipeline.sources import open_source
 from app.pipeline.tracker import ByteTracker
 from app.pipeline.worker import CameraWorker, FrameHook, PublishFn
+from app.privacy import PrivacyPolicy
 from app.rules import RulesEngine, RulesHook
 
 log = logging.getLogger(__name__)
@@ -177,6 +178,7 @@ class Engine:
         s = config.settings
         self.emit = emit
         self.db_writer = db_writer
+        self.privacy = PrivacyPolicy(s.privacy)
         self.event_bus = EventBus(config.rules, self._event_sink)
         self.rules_engine = RulesEngine(
             config.rules, self.event_bus, s.app.timezone, config.rules.defaults.presence_gap_s
@@ -254,6 +256,7 @@ class Engine:
                     publish_fps=s.streaming.mjpeg_max_fps,
                     jpeg_quality=s.streaming.mjpeg_jpeg_quality,
                     max_infer_fps=s.pipeline.realtime_max_fps,
+                    privacy=self.privacy,
                     **kwargs,
                 )
             )  # fmt: skip
@@ -463,6 +466,15 @@ class Engine:
             if c.done:
                 worker.hooks = [h for h in worker.hooks if h is not c]
                 self.collectors.remove((worker, c))
+
+    def unblur(self, camera_id: str, seconds: float) -> dict[str, Any]:
+        """Show unknown faces on one live stream for `seconds` (the API audits who asked)."""
+        seconds = min(seconds, self.config.settings.privacy.unblur_max_s)
+        for w in self.workers:
+            if w.camera.id == camera_id:
+                w.unblur_until = time.monotonic() + seconds
+                return {"camera_id": camera_id, "seconds": seconds}
+        return {"error": f"camera {camera_id} is not running"}
 
     def embed_images(self, images: list[np.ndarray]) -> dict[str, Any]:
         """Embeddings for uploaded enrollment photos: best face per photo (+ body if the photo
@@ -699,6 +711,8 @@ def handle_command(
                 cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR) for b in args["images"]
             ]
             reply(req_id, engine.embed_images([i for i in imgs if i is not None]))
+        elif cmd == "unblur":
+            reply(req_id, engine.unblur(args["camera_id"], float(args["seconds"])))
         elif cmd == "embed_text":
             clip = engine.clip_encoder
             if clip is None:

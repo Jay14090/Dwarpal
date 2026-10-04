@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import cv2
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, select
@@ -13,6 +15,9 @@ from app.main import create_app
 from app.pipeline.engine import store_event
 
 pytestmark = pytest.mark.db
+
+_img = np.random.default_rng(0).integers(0, 255, (192, 80, 3), dtype=np.uint8)
+JPEG = cv2.imencode(".jpg", _img)[1].tobytes()
 
 
 @pytest.fixture
@@ -33,7 +38,7 @@ def test_store_event_links_identity_and_thumbnail(api):
     client, db, config = api
     cam = config.cameras.cameras[0].id
     ev = EventRecord("unknown_in_restricted_zone", "unknown_in_zone", "high", cam, time.time(), global_id=42,
-                     payload={"zone": "lobby"}, thumb_jpeg=b"\xff\xd8thumb")  # fmt: skip
+                     payload={"zone": "lobby"}, thumb_jpeg=JPEG)  # fmt: skip
     with Session(db) as s:
         eid = store_event(s, ev, config.settings.paths.thumbs_dir)
         s.commit()
@@ -45,7 +50,14 @@ def test_store_event_links_identity_and_thumbnail(api):
         and evs[0]["rule_type"] == "unknown_in_zone"
     )
     assert evs[0]["thumb_url"] == f"/events/{eid}/thumb.jpg"
-    assert client.get(evs[0]["thumb_url"]).content == b"\xff\xd8thumb"
+    r = client.get(evs[0]["thumb_url"])  # pending identity: served with the head blurred
+    assert r.status_code == 200 and r.content != JPEG
+    assert (
+        client.get(
+            evs[0]["thumb_url"], params={"unblur": True}, headers={"X-Actor": "admin"}
+        ).content
+        == JPEG
+    )
 
     r = client.post(f"/events/{eid}/ack", headers={"X-Actor": "guard1"})
     assert r.status_code == 200 and r.json()["acknowledged"] is True
@@ -54,6 +66,10 @@ def test_store_event_links_identity_and_thumbnail(api):
     assert client.post("/events/999999/ack").status_code == 404
     with Session(db) as s:
         audits = s.scalars(select(AuditLog).where(AuditLog.action == "ack_event")).all()
+        assert (
+            s.scalars(select(AuditLog).where(AuditLog.action == "unblur_thumbnail")).one().actor
+            == "admin"
+        )
         assert [(a.actor, a.target) for a in audits] == [("guard1", f"event:{eid}")]
 
 

@@ -1,12 +1,14 @@
 "use client";
 
-import { Car, Trash2, Upload, User } from "lucide-react";
+import { Car, ScrollText, Trash2, Upload, User } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Badge, RoleBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label, Select } from "@/components/ui/input";
 import { api, apiUrl, type Vehicle } from "@/lib/api";
+import { isAdmin, useActor } from "@/lib/use-actor";
+import { fmtTime } from "@/lib/utils";
 
 type Person = {
   id: number;
@@ -100,6 +102,69 @@ function UploadEnroll({ onDone }: { onDone: () => void }) {
           {busy ? "Enrolling…" : "Enroll"}
         </Button>
         {msg && <p className={msg.ok ? "text-xs text-muted-foreground" : "text-xs text-unknown"}>{msg.text}</p>}
+      </CardContent>
+    </Card>
+  );
+}
+
+type Audit = { id: number; ts: string; actor: string; action: string; target: string; details: Record<string, unknown> };
+
+function PrivacyCard() {
+  const admin = isAdmin(useActor());
+  const [rows, setRows] = useState<Audit[] | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    if (!admin) return;
+    let stale = false;
+    api<Audit[]>("/audit?limit=50")
+      .then((r) => !stale && setRows(r))
+      .catch((e) => !stale && setMsg((e as Error).message));
+    return () => {
+      stale = true;
+    };
+  }, [admin, version]);
+  const retention = async () => {
+    try {
+      const r = await api<{ tracks: number; embeddings: number; files: number }>("/privacy/retention", { method: "POST" });
+      setMsg(`Retention: ${r.tracks} tracks, ${r.embeddings} embeddings, ${r.files} files removed.`);
+      setVersion((v) => v + 1);
+    } catch (e) {
+      setMsg((e as Error).message);
+    }
+  };
+  return (
+    <Card className="xl:col-span-3">
+      <CardHeader className="flex-row items-center justify-between">
+        <div>
+          <CardTitle className="flex items-center gap-2">
+            <ScrollText className="size-4" /> Privacy & audit log
+          </CardTitle>
+          <CardDescription>
+            Unknown faces are blurred everywhere. Unknown-person data is deleted after the retention window. Every unblur, enrollment and
+            acknowledgement is logged.
+          </CardDescription>
+        </div>
+        {admin && (
+          <Button size="sm" variant="outline" onClick={retention}>
+            Run retention now
+          </Button>
+        )}
+      </CardHeader>
+      <CardContent className="grid gap-1 text-xs">
+        {!admin && <p className="text-muted-foreground">Switch to the admin actor (bottom of the menu) to view the audit log.</p>}
+        {msg && <p className="text-muted-foreground">{msg}</p>}
+        {admin &&
+          rows?.map((a) => (
+            <div key={a.id} className="grid grid-cols-[10rem_6rem_10rem_1fr] gap-2 border-b py-1 font-mono last:border-0">
+              <span className="text-muted-foreground">{fmtTime(a.ts)}</span>
+              <span>{a.actor}</span>
+              <span>{a.action}</span>
+              <span className="truncate text-muted-foreground">
+                {a.target} {Object.keys(a.details ?? {}).length ? JSON.stringify(a.details) : ""}
+              </span>
+            </div>
+          ))}
       </CardContent>
     </Card>
   );
@@ -229,6 +294,7 @@ export default function RegistryPage() {
       </Card>
 
       <UploadEnroll onDone={load} />
+      <PrivacyCard />
     </div>
   );
 }

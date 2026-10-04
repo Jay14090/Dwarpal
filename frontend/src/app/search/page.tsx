@@ -1,12 +1,13 @@
 "use client";
 
-import { Car, Film, Search as SearchIcon, X } from "lucide-react";
+import { Car, Eye, Film, Search as SearchIcon, X } from "lucide-react";
 import { useState } from "react";
 import { Badge, RoleBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { api, apiUrl, type PlateResult, type SearchFilter, type SearchResponse, type TrackResult } from "@/lib/api";
+import { api, apiUrl, protectedImage, type PlateResult, type SearchFilter, type SearchResponse, type TrackResult } from "@/lib/api";
+import { isAdmin, useActor } from "@/lib/use-actor";
 import { fmtTime } from "@/lib/utils";
 
 const EXAMPLES = [
@@ -40,12 +41,21 @@ function FilterChips({ f }: { f: SearchFilter }) {
 }
 
 function TrackCard({ r, onPlay }: { r: TrackResult; onPlay: (url: string) => void }) {
+  const admin = isAdmin(useActor());
+  const [raw, setRaw] = useState<string | null>(null);
+  const unblur = async () => {
+    try {
+      setRaw(await protectedImage(`/tracks/${r.track_id}/thumb.jpg?unblur=true`));
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
   return (
     <Card className="overflow-hidden">
       <div className="relative flex aspect-[3/4] items-center justify-center bg-black">
         {r.thumb_url ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={apiUrl(r.thumb_url)} alt="" className="size-full object-contain" />
+          <img src={raw ?? apiUrl(r.thumb_url)} alt="" className="size-full object-contain" />
         ) : (
           <span className="text-xs text-muted-foreground">no thumbnail</span>
         )}
@@ -64,11 +74,18 @@ function TrackCard({ r, onPlay }: { r: TrackResult; onPlay: (url: string) => voi
           {r.upper_color ?? "?"} / {r.lower_color ?? "?"}
           {r.height_cm != null && ` · ${Math.round(r.height_cm)}±${Math.round(r.height_err_cm ?? 0)} cm`}
         </div>
-        {r.clip_url && (
-          <Button size="sm" variant="outline" onClick={() => onPlay(r.clip_url!)}>
-            <Film /> Clip
-          </Button>
-        )}
+        <div className="flex gap-1">
+          {r.clip_url && (
+            <Button size="sm" variant="outline" className="flex-1" onClick={() => onPlay(r.clip_url!)}>
+              <Film /> Clip
+            </Button>
+          )}
+          {admin && r.thumb_url && !raw && ["unknown", "pending"].includes(r.role) && (
+            <Button size="sm" variant="outline" title="Show the face (audited)" onClick={unblur}>
+              <Eye />
+            </Button>
+          )}
+        </div>
       </CardContent>
     </Card>
   );

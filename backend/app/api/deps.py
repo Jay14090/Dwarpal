@@ -32,3 +32,11 @@ def engine_proc(request: Request) -> EngineProcess:
 def actor(x_actor: str | None = Header(default=None)) -> str:
     """Who is acting, for the audit log. Real authentication is out of scope for the demo."""
     return (x_actor or "operator")[:64]
+
+
+def require_admin(request: Request, x_actor: str | None = Header(default=None)) -> str:
+    """Actor allowed to see unblurred faces / run privacy actions (privacy.admin_actors)."""
+    who = actor(x_actor)
+    if who not in request.app.state.config.settings.privacy.admin_actors:
+        raise HTTPException(403, f"{who!r} is not a privacy admin")
+    return who

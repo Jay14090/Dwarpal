@@ -119,8 +119,18 @@ class FaceSettings(StrictModel):
 
 class PrivacySettings(StrictModel):
     blur_unknown_faces: bool = True
+    # identity states whose faces are blurred (anyone not identified as a consented, enrolled person)
+    blur_roles: list[str] = Field(default_factory=lambda: ["unknown", "pending"])
+    head_fraction: float = Field(
+        0.24, gt=0.0, le=0.6
+    )  # top part of the person box treated as the head
     unknown_retention_days: int = Field(7, ge=1)
+    retention_interval_s: float = Field(3600.0, gt=0)
     require_consent: bool = True
+    admin_actors: list[str] = Field(
+        default_factory=lambda: ["admin"]
+    )  # X-Actor values allowed to unblur
+    unblur_max_s: float = Field(300.0, gt=0)  # a live-stream unblur expires after this
 
 
 class LLMSettings(StrictModel):

@@ -1,6 +1,6 @@
 "use client";
 
-import { Camera, CircleDot, UserPlus } from "lucide-react";
+import { Camera, CircleDot, Eye, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { EventRow } from "@/components/event-row";
 import { Badge } from "@/components/ui/badge";
@@ -9,11 +9,22 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input, Label, Select } from "@/components/ui/input";
 import { api, apiUrl, type CameraInfo, type EventItem } from "@/lib/api";
 import { useLiveFeed, type FeedMessage } from "@/lib/use-live-feed";
+import { isAdmin, useActor } from "@/lib/use-actor";
 
 type FrameMeta = { tracks: { label: string; role: string | null; global_id: number | null }[] };
 
 function CameraTile({ cam }: { cam: CameraInfo }) {
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const admin = isAdmin(useActor());
+  const unblur = async () => {
+    const reason = prompt(`Reason for showing unknown faces on ${cam.name} for 60 s (written to the audit log):`);
+    if (!reason) return;
+    try {
+      await api("/privacy/unblur-stream", { method: "POST", body: JSON.stringify({ camera_id: cam.id, seconds: 60, reason }) });
+    } catch (e) {
+      alert((e as Error).message);
+    }
+  };
   useEffect(() => {
     const t = setInterval(async () => {
       try {
@@ -49,7 +60,12 @@ function CameraTile({ cam }: { cam: CameraInfo }) {
             {s?.infer_ms ? ` · ${s.infer_ms} ms` : ""}
           </div>
         </div>
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap items-center gap-1">
+          {admin && (
+            <button onClick={unblur} title="Unblur faces for 60 s (audited)" className="rounded border p-1 text-muted-foreground hover:bg-accent">
+              <Eye className="size-3.5" />
+            </button>
+          )}
           {(["resident", "staff", "unknown", "pending"] as const).map((r) =>
             counts[r] ? (
               <Badge key={r} variant={r}>

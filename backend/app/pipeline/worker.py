@@ -23,6 +23,7 @@ from app.pipeline.detector import Detector
 from app.pipeline.frames import Frame, FrameResult, Track
 from app.pipeline.sources import FrameSource
 from app.pipeline.tracker import Tracker
+from app.privacy import PrivacyPolicy
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ class CameraWorker:
         publish_fps: float = 15.0,
         jpeg_quality: int = 80,
         max_infer_fps: float = 15.0,
+        privacy: PrivacyPolicy | None = None,
     ) -> None:
         if cache is None and (detector is None or tracker is None):
             raise ValueError(f"{camera.id}: needs a cache or a detector + tracker")
@@ -81,6 +83,8 @@ class CameraWorker:
         self.tracker = tracker
         self.cache = cache
         self.hooks = hooks or []
+        self.privacy = privacy
+        self.unblur_until = 0.0  # monotonic deadline of an audited admin unblur (P10)
         self.publish_interval = 1.0 / publish_fps
         self.infer_interval = 1.0 / max_infer_fps
         self.jpeg_params = [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
@@ -123,7 +127,10 @@ class CameraWorker:
         return result
 
     def _publish(self, result: FrameResult) -> None:
-        img = self.annotator.draw(result.frame.image, result.tracks)
+        img = result.frame.image
+        if self.privacy is not None and time.monotonic() >= self.unblur_until:
+            img = self.privacy.frame(img, result.tracks)  # blur heads of unknown/pending people
+        img = self.annotator.draw(img, result.tracks)
         ok, buf = cv2.imencode(".jpg", img, self.jpeg_params)
         if not ok:
             return

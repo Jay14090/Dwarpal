@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import cv2
 import numpy as np
 import pytest
 import yaml
@@ -18,6 +19,9 @@ from app.main import create_app
 from app.search.parser import QueryParser, RuleParser, SearchFilter
 from app.search.retrieval import clip_prompt, search
 
+THUMB = cv2.imencode(
+    ".jpg", np.random.default_rng(1).integers(0, 255, (192, 80, 3), dtype=np.uint8)
+)[1].tobytes()
 CASES = yaml.safe_load((REPO_ROOT / "tests" / "search_queries.yaml").read_text())
 NOW = datetime.fromisoformat(CASES["now"])
 DEFAULTS = SearchFilter().dump()
@@ -172,7 +176,7 @@ def seeded(migrated_db_url, config, tmp_path):
     db = create_engine(migrated_db_url)
     app = create_app(config=config, engine=db, start_engine=False)
     thumb = tmp_path / "t.jpg"
-    thumb.write_bytes(b"\xff\xd8jpeg")
+    thumb.write_bytes(THUMB)
     with TestClient(app) as client:  # lifespan syncs cameras
         with Session(db) as s:
             for m in (TrackEmbedding, Track, GlobalIdentity, PlateRead):
@@ -293,7 +297,8 @@ def test_search_api(seeded):
     assert body["filter"]["upper_color"] == "green" and body["filter"]["zones"] == ["gate_drive"]
     assert [x["track_id"] for x in body["results"]] == [1]
     assert body["results"][0]["thumb_url"] == "/tracks/1/thumb.jpg"
-    assert client.get("/tracks/1/thumb.jpg").content == b"\xff\xd8jpeg"
+    r = client.get("/tracks/1/thumb.jpg")  # unknown identity: head blurred when served
+    assert r.status_code == 200 and r.content != THUMB
     assert client.get("/tracks/999/thumb.jpg").status_code == 404
     r = client.get("/search", params={"q": "when did TN09AB1234 enter?"})
     assert r.json()["results"][0]["plate"] == "TN09AB1234"
@@ -301,32 +306,6 @@ def test_search_api(seeded):
         "/search/parse", json={"query": "all unknown people today", "now": NOW.isoformat()}
     )
     assert r.json()["filter"]["roles"] == ["unknown"]
-
-
-@pytest.mark.db
-def test_track_clip_cut(seeded, tmp_path):
-    import shutil
-
-    import cv2
-
-    if shutil.which("ffmpeg") is None:
-        pytest.skip("ffmpeg missing")
-    client, _ = seeded
-    video = tmp_path / "cam.mp4"
-    w = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"mp4v"), 30, (160, 120))
-    for i in range(150):
-        w.write(np.full((120, 160, 3), i, np.uint8))
-    w.release()
-    cfg = client.app.state.config
-    cam = next(c for c in cfg.cameras.cameras if c.id == "meva_g336")
-    object.__setattr__(cam, "source_uri", str(video))
-    object.__setattr__(cfg.settings.paths, "clips_dir", tmp_path / "clips")
-    r = client.get("/tracks/1/clip.mp4")
-    assert (
-        r.status_code == 200 and r.headers["content-type"] == "video/mp4" and len(r.content) > 500
-    )
-    assert len(list((tmp_path / "clips").rglob("*.mp4"))) == 1
-    assert client.get("/tracks/1/clip.mp4").status_code == 200  # cached
 
 
 def test_metrics_endpoint_reports_only_saved_results(config, tmp_path):

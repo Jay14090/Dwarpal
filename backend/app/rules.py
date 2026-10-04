@@ -182,14 +182,13 @@ class RulesEngine:
 def crop_jpeg(
     image: np.ndarray, xyxy: tuple[float, float, float, float], height: int = 192
 ) -> bytes | None:
+    """The person box exactly (privacy.blur_crop blurs its top part when the thumbnail is served)."""
     H, W = image.shape[:2]
-    x1, y1, x2, y2 = xyxy
-    pw, ph = (x2 - x1) * 0.15, (y2 - y1) * 0.1
     x1, y1, x2, y2 = (
-        int(max(0, x1 - pw)),
-        int(max(0, y1 - ph)),
-        int(min(W, x2 + pw)),
-        int(min(H, y2 + ph)),
+        int(max(0, xyxy[0])),
+        int(max(0, xyxy[1])),
+        int(min(W, xyxy[2])),
+        int(min(H, xyxy[3])),
     )
     crop = image[y1:y2, x1:x2]
     if crop.size == 0:
