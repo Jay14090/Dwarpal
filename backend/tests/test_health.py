@@ -9,7 +9,7 @@ from app.main import create_app
 
 def _client(config, url: str) -> TestClient:
     engine = create_engine(url, connect_args={"connect_timeout": 2})
-    return TestClient(create_app(config=config, engine=engine))
+    return TestClient(create_app(config=config, engine=engine, start_engine=False))
 
 
 def test_health_reports_db_down(config):

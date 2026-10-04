@@ -70,14 +70,14 @@ streams: infra-up ## Loop every processed video as RTSP (rtsp://localhost:8554/<
 streams-stop: ## Stop the RTSP loopers
 	scripts/stream_cameras.sh stop
 
-index: ## (P2/P3) Precompute detections for cached-mode cameras
-	@echo "make index lands in P2/P3"; exit 1
+index: ## Precompute tracked detections for cached-mode cameras (or run notebooks/colab_index.ipynb)
+	$(RUN) python scripts/index_cameras.py $(CAMERAS)
 
 demo: ## (P11) Start everything for the demo
 	@echo "make demo lands in P11"; exit 1
 
-eval: ## (P3+) Compute metrics against ground truth
-	@echo "make eval lands in P3"; exit 1
+eval: ## Compute metrics against ground truth (IDF1 etc.; needs SmartSpaces + make index)
+	$(RUN) python scripts/evaluate.py $(EVAL_ARGS)
 
 clean: ## Remove caches (keeps data/ and the DB volume)
 	rm -rf .pytest_cache .ruff_cache

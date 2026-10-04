@@ -133,3 +133,60 @@ adapted SmartSpaces cameras to `cameras.yaml`.
 Note for the user's GPU: PyPI `torch` 2.14 ships CUDA 13 wheels. These need a recent Windows NVIDIA
 driver (R580+) and a Turing-or-newer GPU (GTX 16xx / RTX). On a Pascal card (GTX 10xx), install
 from the cu126 index instead (see README).
+
+## P2 Single-camera pipeline
+
+### Plan
+- `pipeline/sources.py`: `VideoFileSource` (looped, paced at native fps, frame index = file
+  position, optional shared epoch for synchronized timestamps), `CaptureSource` (RTSP/webcam with
+  reconnect), `LatestFrameSource` (background reader keeping only the newest frame, so realtime
+  inference skips frames instead of lagging).
+- `pipeline/detector.py`: `Detector` protocol plus `YoloDetector` (Ultralytics **YOLO26**, the newest
+  family in Ultralytics 8.4; person, bicycle, car, motorcycle, bus, truck; FP16 on CUDA via `quantize=16`).
+- `pipeline/tracker.py`: `ByteTracker` wrapping Ultralytics ByteTrack, with separate instances for
+  people and vehicles so a person is never associated with a car box.
+- `pipeline/worker.py`: `CameraWorker`. One code path for realtime (detect → track) and cached
+  (lookup in `data/cache/<cam>/tracks.npz`), then hooks (P3+), annotation and JPEG publishing at
+  ≤ `mjpeg_max_fps`.
+- `pipeline/engine.py`: all workers run in **one spawned engine process**. A `BatchingDetector`
+  groups concurrent frames from realtime cameras into one forward pass. Frames reach the API over
+  an `mp.Queue` (dropped when full, never blocking inference) into a `FrameHub`.
+- API: `/cameras`, `/cameras/{id}/stream.mjpg`, `/snapshot.jpg`, `/frame.json`, `/pipeline/stats`,
+  and a debug grid page at `/live` (the Next.js dashboard comes in P9).
+- `scripts/index_cameras.py` (`make index`) builds the caches; `notebooks/colab_index.ipynb` does the
+  same on a Colab GPU.
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D17 | Detector default `yolo26s.pt` (10 M params). Sandbox and CPU-only runs use `yolo26n.pt` | s is the accuracy/speed sweet spot for an under-8 GB GPU; n is the CPU fallback |
+| D18 | Engine runs in a separate process (spawn), API side only stores the latest JPEG per camera | Inference never blocks HTTP/MJPEG, and CUDA stays out of the API process |
+| D19 | Realtime workers pull the newest frame at ≤ `realtime_max_fps` (15) and publish every processed frame | No stale boxes and bounded GPU load per camera |
+| D20 | MJPEG box/label colors by role (`pipeline.annotate.colors`); labels show the role initial + global id (P3+), never names | CLAUDE.md: role only on the live view |
+| D21 | Ultralytics usage analytics are disabled in code (`pipeline/ultra.py`, `settings.sync=false`) | Privacy: nothing leaves the machine. The sandbox proxy caught YOLO calling google-analytics.com |
+| D22 | MEVA G339 stays disabled: it is a patrol PTZ (its view changes between samples) | Static zones and cached boxes don't fit a moving camera |
+
+### Status
+**Done.** DoD: cameras are visible in the browser at `http://localhost:8000/live`
+(MJPEG `/cameras/<id>/stream.mjpg`) with stable track IDs. Measured in the sandbox (CPU only, no GPU):
+
+| What | Number |
+|---|---|
+| Detect + track, single frame, `yolo26n` @640, CPU | 13.2 fps |
+| Detect + track, single frame, `yolo26s` @640, CPU | 8.1 fps |
+| `make index` (batch 4, `yolo26n`, CPU), 9000-frame MEVA clips | 19.2 fps (G336), 18.9 fps (G328) |
+| Engine, realtime file camera (G339), `yolo26n`, CPU shared with an indexer | 7.3 fps processed, 128 ms/frame, 0 dropped |
+| Engine, cached cameras (G336 + G328) | 30.0 fps replay each, **15.0 fps** published (cap), MJPEG ~14.5 frames/s per client |
+
+Track-ID stability from the 5-minute caches: in G328, 6 of 7 parked cars keep **one ID for the whole
+300 s** (11 car tracks are ≥ 10 s). Person tracks are short in MEVA (median 0.8-1.3 s): people are
+~40 px tall at 720p and `yolo26n` on CPU misses them intermittently. The configured `yolo26s` on the
+user's GPU should do better; this is re-measured with GT on SmartSpaces in P3 (per-camera IDF1).
+GPU fps on the target machine is not measured yet: `make index` prints it.
+
+Fixed during verification: CaptureSource spun in a tight reconnect loop when the webcam stream was
+absent (now backs off and warns once per outage); the publish throttle delivered ~12 fps instead of 15.
+
+The engine also wires in the P3 Re-ID/global-ID hooks (`pipeline/crosscam.py`,
+`pipeline/global_tracker.py`). Without Re-ID weights they log one error and the camera runs without
+global IDs; P3 below covers them.

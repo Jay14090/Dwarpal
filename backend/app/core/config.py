@@ -133,6 +133,74 @@ class DatasetSettings(StrictModel):
     meva: MevaSettings
 
 
+class DetectorSettings(StrictModel):
+    weights: Path
+    imgsz: int = Field(640, ge=64)
+    conf: float = Field(0.25, ge=0.0, le=1.0)
+    classes: dict[str, int] = Field(min_length=1)
+    batch_size: int = Field(4, ge=1)
+
+
+class TrackerSettings(StrictModel):
+    type: Literal["bytetrack"] = "bytetrack"
+    track_high_thresh: float = Field(0.25, ge=0.0, le=1.0)
+    track_low_thresh: float = Field(0.1, ge=0.0, le=1.0)
+    new_track_thresh: float = Field(0.25, ge=0.0, le=1.0)
+    track_buffer: int = Field(30, ge=1)
+    match_thresh: float = Field(0.8, ge=0.0, le=1.0)
+    fuse_score: bool = True
+
+
+class AnnotateSettings(StrictModel):
+    thickness: int = Field(2, ge=1)
+    font_scale: float = Field(0.5, gt=0)
+    colors: dict[str, tuple[int, int, int]]
+
+    @field_validator("colors")
+    @classmethod
+    def _roles(cls, v: dict[str, tuple[int, int, int]]) -> dict[str, tuple[int, int, int]]:
+        missing = {"resident", "staff", "unknown", "pending", "vehicle"} - set(v)
+        if missing:
+            raise ValueError(f"annotate.colors missing {sorted(missing)}")
+        return v
+
+
+class PipelineSettings(StrictModel):
+    detector: DetectorSettings
+    tracker: TrackerSettings = TrackerSettings()
+    realtime_max_fps: float = Field(15, gt=0)
+    frame_queue_size: int = Field(32, ge=1)
+    min_box_height_px: int = Field(24, ge=0)
+    engine_autostart: bool = (
+        True  # start the engine process with the API (env DWARPAL_ENGINE=0 disables)
+    )
+    annotate: AnnotateSettings
+
+
+class ReidSettings(StrictModel):
+    backend: Literal["osnet", "colorhist"] = "osnet"
+    arch: str = "osnet_x1_0"
+    weights: Path
+    weights_url: str = ""
+    input_height: int = Field(256, ge=32)
+    input_width: int = Field(128, ge=16)
+    batch_size: int = Field(32, ge=1)
+    sample_every: int = Field(5, ge=1)
+    max_samples: int = Field(10, ge=1)
+    min_quality: float = Field(0.15, ge=0.0, le=1.0)
+
+
+class GlobalTrackerSettings(StrictModel):
+    min_samples: int = Field(3, ge=1)
+    match_threshold: float = Field(0.55, ge=-1.0, le=2.0)
+    appearance_weight: float = Field(1.0, ge=0.0)
+    position_weight: float = Field(0.6, ge=0.0)
+    same_place_m: float = Field(1.5, gt=0)
+    max_speed_mps: float = Field(3.0, gt=0)
+    forget_after_s: float = Field(600, gt=0)
+    gallery_size: int = Field(20, ge=1)
+
+
 class Settings(StrictModel):
     app: AppSettings = AppSettings()
     server: ServerSettings = ServerSettings()
@@ -145,6 +213,9 @@ class Settings(StrictModel):
     privacy: PrivacySettings = PrivacySettings()
     llm: LLMSettings = LLMSettings()
     datasets: DatasetSettings
+    pipeline: PipelineSettings
+    reid: ReidSettings
+    global_tracker: GlobalTrackerSettings = GlobalTrackerSettings()
 
 
 # --------------------------------------------------------------------------- cameras.yaml
@@ -312,6 +383,14 @@ def load_config(
         settings_raw = _apply_env_overrides(_read_yaml(cdir / "settings.yaml"), env)
         settings = Settings.model_validate(settings_raw)
         settings = settings.model_copy(update={"paths": settings.paths.resolved(root)})
+        if not settings.reid.weights.is_absolute():
+            reid = settings.reid.model_copy(update={"weights": root / settings.reid.weights})
+            settings = settings.model_copy(update={"reid": reid})
+        det = settings.pipeline.detector
+        if not det.weights.is_absolute():
+            det = det.model_copy(update={"weights": root / det.weights})
+            pipe = settings.pipeline.model_copy(update={"detector": det})
+            settings = settings.model_copy(update={"pipeline": pipe})
         return Config(
             root_dir=root,
             config_dir=cdir,

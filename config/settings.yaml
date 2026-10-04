@@ -76,3 +76,59 @@ datasets:
     clip_prefix: "2018-03-11.13-50"
     cameras: [school.G328, school.G336, school.G339]   # parking, school exterior/road, parking PTZ
     max_seconds: null
+
+# Per-camera pipeline (P2). Detector: Ultralytics YOLO26; tracker: ByteTrack.
+pipeline:
+  detector:
+    weights: models/yolo26s.pt     # yolo26n.pt for CPU-only machines
+    imgsz: 640
+    conf: 0.25
+    # Our label -> COCO class id
+    classes: {person: 0, bicycle: 1, car: 2, motorcycle: 3, bus: 5, truck: 7}
+    batch_size: 4                  # frames per forward pass when several realtime cameras are due
+  tracker:
+    type: bytetrack
+    track_high_thresh: 0.25
+    track_low_thresh: 0.1
+    new_track_thresh: 0.3
+    track_buffer: 45               # frames a lost track is kept (1.5 s @ 30 fps)
+    match_thresh: 0.8
+    fuse_score: true
+  realtime_max_fps: 15             # cap inference rate per realtime camera
+  frame_queue_size: 32             # engine -> API frames buffered before dropping
+  min_box_height_px: 24            # ignore tiny detections (not useful for identity)
+  engine_autostart: true           # API starts the engine process (DWARPAL_ENGINE=0 to disable)
+  annotate:
+    thickness: 2
+    font_scale: 0.5
+    # BGR colors by role (CLAUDE.md demo target)
+    colors:
+      resident: [80, 200, 60]
+      staff: [230, 140, 30]
+      unknown: [40, 40, 230]
+      pending: [160, 160, 160]
+      vehicle: [0, 210, 255]
+
+# Body Re-ID (P3). OSNet x1.0 trained on MSMT17 (official torchreid model zoo checkpoint).
+reid:
+  backend: osnet                  # osnet | colorhist (weak fallback, tests only)
+  arch: osnet_x1_0
+  weights: models/osnet_x1_0_msmt17.pt
+  weights_url: https://drive.google.com/uc?id=112EMUfBPYeYg70w-syK6V6Mx8-Qb9Q1M
+  input_height: 256
+  input_width: 128
+  batch_size: 32
+  sample_every: 5                 # frames between embedding samples of one track
+  max_samples: 10                 # best-quality samples kept per track
+  min_quality: 0.15               # crops below this are not embedded
+
+# Cross-camera global IDs (P3): appearance + spatio-temporal gating.
+global_tracker:
+  min_samples: 3                  # quality samples before a local track is matched
+  match_threshold: 0.55           # combined score needed to join an existing identity
+  appearance_weight: 1.0
+  position_weight: 0.6            # bonus when calibrated cameras place both at the same spot
+  same_place_m: 1.5               # concurrent sightings further apart than this cannot be one person
+  max_speed_mps: 3.0              # walking-speed limit for non-overlapping sightings
+  forget_after_s: 600             # identities unseen this long are no longer matched
+  gallery_size: 20                # embeddings kept per identity
