@@ -17,6 +17,9 @@ import sys
 import time
 from pathlib import Path
 
+from app.anpr.hook import PlateHook, PlateReadRecorder, plates_cache_path
+from app.anpr.ocr import build_plate_ocr
+from app.anpr.plate_detector import build_plate_detector
 from app.core.config import FaceSettings, ReidSettings, get_config
 from app.core.device import resolve_device
 from app.pipeline.cache import TrackCacheWriter, cache_path
@@ -35,7 +38,8 @@ log = logging.getLogger("index")
 def index_camera(camera_id: str, video: Path, detector: YoloDetector, out: Path,
                  batch: int, max_frames: int | None, tracker: ByteTracker,
                  encoder: ReidEncoder | None = None, reid_cfg: ReidSettings | None = None,
-                 face_encoder: FaceEncoder | None = None, face_cfg: FaceSettings | None = None) -> dict:  # fmt: skip
+                 face_encoder: FaceEncoder | None = None, face_cfg: FaceSettings | None = None,
+                 plate_hook: PlateHook | None = None) -> dict:  # fmt: skip
     src = VideoFileSource(camera_id, video, loop=False, paced=False)
     total = min(src.num_frames, max_frames) if max_frames else src.num_frames
     writer = TrackCacheWriter(detector.labels)
@@ -70,6 +74,8 @@ def index_camera(camera_id: str, video: Path, detector: YoloDetector, out: Path,
                 hook(result)
             if face_hook is not None:
                 face_hook(result)
+            if plate_hook is not None:
+                plate_hook(result)
         done += len(frames)
         if done % (batch * 50) < batch:
             el = time.perf_counter() - t0
@@ -109,7 +115,9 @@ def main() -> int:
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--no-reid", action="store_true", help="skip Re-ID embeddings")
     parser.add_argument("--no-faces", action="store_true", help="skip face samples")
-    parser.add_argument("--cache-dir", type=Path, help="write here instead of paths.cache_dir (smoke tests)")
+    parser.add_argument(
+        "--cache-dir", type=Path, help="write here instead of paths.cache_dir (smoke tests)"
+    )
     parser.add_argument(
         "--reid-backend", choices=["osnet", "colorhist"], help="override reid.backend"
     )
@@ -145,10 +153,18 @@ def main() -> int:
         video = video if video.is_absolute() else config.root_dir / video
         tracker = ByteTracker(s.pipeline.tracker, s.pipeline.min_box_height_px)
         out = cache_path(args.cache_dir or s.paths.cache_dir, cam.id)
+        plate_hook = plate_rec = None
+        if cam.anpr:
+            plate_rec = PlateReadRecorder()
+            plate_hook = PlateHook(cam.id, s.anpr, lambda d: None, detector=build_plate_detector(s.anpr.detector, device),
+                                   ocr=build_plate_ocr(s.anpr.ocr, device), recorder=plate_rec)  # fmt: skip
         meta = index_camera(
             cam.id, video, detector, out, batch, args.max_frames, tracker,
-            encoder, reid_cfg, face_encoder, s.face,
+            encoder, reid_cfg, face_encoder, s.face, plate_hook,
         )  # fmt: skip
+        if plate_rec is not None:
+            plate_rec.save(plates_cache_path(out.parent.parent, cam.id))
+            meta["plate_reads"] = len(plate_rec.lines)
         log.info("%s: wrote %s  (%d frames, %.1f fps end-to-end, detector %.1f fps on %s)",
                  cam.id, out, meta["num_frames"], meta["index_fps"], meta["detect_fps"] or 0, device)  # fmt: skip
     return 0

@@ -312,3 +312,53 @@ curl -X POST localhost:8000/enroll/capture -H 'content-type: application/json' \
   -d '{"camera_id":"webcam","role":"resident","display_name":"You","consent":true}'
 ```
 Look at the camera for ~6 s; the box turns green **R** without leaving the frame.
+
+## P5 ANPR
+
+### Plan
+- **Reuse pretrained models** ("train or reuse"): plate detector `yolo-v9-t-640-license-plate-end2end`
+  (open-image-models, ONNX) and OCR `cct-s-v2-global-model` (fast-plate-ocr, ONNX). Both download from
+  GitHub release assets and sit behind `PlateDetector` / `PlateOcr` interfaces. A fine-tuned Ultralytics
+  detector (`backend: yolo`) or a fine-tuned OCR ONNX (`ocr.onnx_path`) drop in through config.
+- `anpr/normalize.py`: template fitting to the Indian formats (standard `^[A-Z]{2}\d{1,2}[A-Z]{0,3}\d{4}$`,
+  BH `^\d{2}BH\d{4}[A-Z]{1,2}$`). Confusable characters (O/0, I/1, B/8, Z/2, S/5, …) are corrected only
+  where the template demands, at a cost of one each; the cheapest fit wins, and a valid RTO state code breaks ties.
+- `anpr/voting.py`: per-vehicle-track vote weighted by OCR confidence (≥ 3 agreeing reads, ≥ 50 % share),
+  settled when the track leaves; reads with any character below `min_char_conf` are dropped.
+- `anpr/registry.py`: exact → `registered`, edit distance 1 → `likely_registered` (verify), else `unregistered`.
+- `anpr/hook.py` (`PlateHook`) on cameras with `anpr: true`. It finds the plate in an expanded vehicle crop, then
+  OCR, normalize and vote. Cached cameras replay raw reads from `plates.jsonl` written by `make index`.
+- `anpr/service.py` + `pipeline/indexer.py` (`DbWriter`, background Postgres writer) + `events.py` (`EventBus`
+  with per-rule cooldown from `rules.yaml`): plate reads go to `plate_reads` with a thumbnail, and an
+  `unregistered_vehicle` event goes to `events` and the API (WebSocket in P8).
+- API: `GET/POST/DELETE /vehicles` (plates normalized and validated, audited), `GET /plates` (+ thumbnails),
+  `GET /events`. Cameras are synced from `cameras.yaml` into the DB at API and engine start.
+- Scripts: `eval_plates.py` (`make plates-eval`), `download_lpr.py` (Kaggle / Roboflow), `make_plate_ocr_dataset.py`
+  (synthetic Indian plates), `adapt_gate_clips.py` (`make gate`), and `notebooks/train_plate.ipynb` (OCR + detector
+  fine-tuning on Colab, exported to ONNX / `.pt`).
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D33 | **Indian-LPR is not public** (authors withhold it for legal reasons), so plate accuracy is measured on any text-labeled Indian set the user provides (`images/` + `labels.csv`) | CLAUDE.md fallback; the Kaggle `kedarsai` set (CC0) has boxes only, no plate text, so it scores the detector only |
+| D34 | Reuse the pretrained global OCR first and fine-tune via Colab when labeled data exists | India is not among its 65 training regions, but the alphabet and 10 slots fit Indian plates; a synthetic sanity check reads them well (below) |
+| D35 | Synthetic plates are for sanity checks and OCR pre-training only, never a reported metric; synthetic *scenes* were dropped from evaluation | Flat shapes on noise gave a meaningless detector recall (12 %) |
+| D36 | Plate events dedup per plate per rule cooldown; event `global_id` lives in the payload until P6 stores global identities | `events.global_id` is an FK to `global_identities` |
+| D37 | Gate clips are kept at up to 1080p (`adapt_gate_clips.py`), dataset cameras at 720p | Plates need pixels |
+
+### Status
+**Code complete and tested. The DoD numbers are held, waiting on user input:**
+1. **A text-labeled Indian plate test set** for exact-plate accuracy (Indian-LPR is unavailable). Drop it in
+   `data/raw/plates_eval/<name>/` (`images/` + `labels.csv`: `filename,plate[,x1,y1,x2,y2]`) and run
+   `make plates-eval PLATES=data/raw/plates_eval/<name>`.
+2. **Your gate CCTV clips** in `data/raw/gate_vehicles/` → `make gate` registers them as ANPR cameras; then
+   `make dev` and register a few plates with `POST /vehicles` to see `registered` / `unregistered` events.
+
+Verified here (sandbox, CPU):
+- Pretrained detector + OCR download and run (detector ~300 ms per 640 px frame on CPU, OCR batched).
+- **Synthetic sanity check (not the DoD metric):** OCR on 300 synthetic HSRP-style Indian plate crops: exact-plate
+  **84.7 %** after normalization (84.3 % raw), character accuracy 97.6 %, valid-format rate 93.7 %.
+- 15 normalization cases, Levenshtein and registry statuses, the voter (noisy reads → right plate, invalid and
+  low-confidence reads ignored, a leaving track settles its vote), identical decisions from cached replay, unregistered
+  event cooldown, stream labels (`MH12AB1234 UNREG`), plate read + event rows in Postgres, an ANPR camera in a live
+  engine emitting plate and event messages, the vehicles/plates/events API, and the gate-clip adapter.

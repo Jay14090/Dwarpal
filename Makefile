@@ -8,7 +8,7 @@ PORT    ?= 8000
 
 .DEFAULT_GOAL := help
 .PHONY: help setup env infra-up infra-down infra-logs migrate dev test lint fmt \
-        data data-meva data-smartspaces inspect streams streams-stop index enroll-sim demo eval clean
+        data data-meva data-smartspaces inspect streams streams-stop index enroll-sim gate plates-eval demo eval clean
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -78,6 +78,12 @@ demo: ## (P11) Start everything for the demo
 
 enroll-sim: ## Simulated enrollment on SmartSpaces (15 residents, 5 staff, seed 42)
 	$(RUN) python scripts/simulate_enrollment.py --residents 15 --staff 5 --seed 42 $(ENROLL_ARGS)
+
+gate: ## Turn your clips in data/raw/gate_vehicles/ into ANPR gate cameras
+	$(RUN) python scripts/adapt_gate_clips.py
+
+plates-eval: ## Plate OCR/detector metrics: PLATES=<dataset dir> (or synthetic sanity check)
+	$(RUN) python scripts/eval_plates.py $(if $(PLATES),--dataset-dir $(PLATES),--synthetic 500)
 
 eval: ## Compute metrics against ground truth (IDF1 etc.; needs SmartSpaces + make index)
 	$(RUN) python scripts/evaluate.py $(EVAL_ARGS)

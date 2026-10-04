@@ -19,18 +19,27 @@ import queue
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
+from datetime import UTC, datetime
 from typing import Any
 
 import cv2
 import numpy as np
 from sqlalchemy.orm import Session
 
+from app.anpr.hook import PlateHook, PlateReadCache, plates_cache_path
+from app.anpr.ocr import OcrRead, PlateOcr, build_plate_ocr
+from app.anpr.plate_detector import PlateBox, PlateDetector, build_plate_detector
+from app.anpr.registry import Registry
+from app.anpr.service import PlateService
 from app.core.config import Camera, Config, load_config
 from app.core.device import resolve_device
 from app.core.logging import setup_logging
 from app.datasets.common import Calibration
+from app.db.models import Event as DbEvent
+from app.events import EventBus, EventRecord
 from app.pipeline.annotate import Annotator
 from app.pipeline.cache import TrackCache, cache_path
 from app.pipeline.crosscam import CrossCameraHook, ReidCache, reid_cache_path
@@ -39,6 +48,7 @@ from app.pipeline.face import FaceEncoder, FaceSample, build_face_encoder
 from app.pipeline.frames import Detections
 from app.pipeline.global_tracker import GlobalTracker
 from app.pipeline.identity import Gallery, IdentityEngine
+from app.pipeline.indexer import DbWriter
 from app.pipeline.person_hooks import (
     EnrollmentCollector,
     FaceHook,
@@ -150,9 +160,24 @@ class Engine:
         face_encoder: FaceEncoder | None = None,
         identity: IdentityEngine | None = None,
         gallery_loader: Callable[[], Gallery] | None = None,
+        plate_detector: PlateDetector | None = None,
+        plate_ocr: PlateOcr | None = None,
+        registry_loader: Callable[[], Registry] | None = None,
+        db_writer: DbWriter | None = None,
+        emit: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.config = config
         s = config.settings
+        self.emit = emit
+        self.db_writer = db_writer
+        self.event_bus = EventBus(config.rules, self._event_sink)
+        self._plate_det = plate_detector
+        self._plate_ocr = plate_ocr
+        self._anpr_error: Exception | None = None
+        self.registry_loader = registry_loader
+        self.plate_service = PlateService(Registry(max_distance=s.anpr.registry_max_distance),
+                                          s.paths.thumbs_dir, self.event_bus, db_writer, emit)  # fmt: skip
+        self.reload_registry()
         cams = [c for c in config.cameras.cameras if c.enabled]
         if camera_ids:
             cams = [c for c in config.cameras.cameras if c.id in camera_ids]
@@ -224,7 +249,7 @@ class Engine:
             encoder = self.encoder
             if encoder is None:
                 log.error("%s: Re-ID unavailable (%s); no global IDs", cam.id, self._encoder_error)
-                return []
+                return self.plate_hooks(cam, cached, fps) if cam.anpr else []
         # A local track lost for longer than the tracker keeps it is over.
         grace_s = s.pipeline.tracker.track_buffer / max(fps, 1.0) + 0.5
         hooks: list[FrameHook] = [
@@ -238,7 +263,33 @@ class Engine:
         elif not cached and self.face_encoder is not None:
             hooks.append(FaceHook(cam.id, s.face, encoder=self.face_encoder))
         hooks.append(IdentityHook(self.identity))
+        if cam.anpr:
+            hooks.extend(self.plate_hooks(cam, cached, fps))
         return hooks
+
+    def plate_hooks(self, cam: Camera, cached: bool, fps: float) -> list[FrameHook]:
+        s = self.config.settings
+        grace = int(s.pipeline.tracker.track_buffer + fps)  # tracker keeps lost tracks this long
+        path = plates_cache_path(s.paths.cache_dir, cam.id)
+        if cached and path.is_file():
+            return [
+                PlateHook(
+                    cam.id,
+                    s.anpr,
+                    self.plate_service.handle,
+                    cache=PlateReadCache(path),
+                    grace_frames=grace,
+                )
+            ]
+        if self.plate_models is None:
+            log.error("%s: ANPR unavailable (%s)", cam.id, self._anpr_error)
+            return []
+        det, ocr = self.plate_models
+        return [
+            PlateHook(
+                cam.id, s.anpr, self.plate_service.handle, detector=det, ocr=ocr, grace_frames=grace
+            )
+        ]
 
     @property
     def encoder(self) -> ReidEncoder | None:
@@ -264,6 +315,49 @@ class Engine:
                 log.error("faces unavailable: %s", exc)
                 self._face_error = exc
         return self._face
+
+    @property
+    def plate_models(self) -> tuple[PlateDetector, PlateOcr] | None:
+        if (self._plate_det is None or self._plate_ocr is None) and self._anpr_error is None:
+            s = self.config.settings
+            try:
+                device = resolve_device(s.device)
+                self._plate_det = self._plate_det or LockedPlateDetector(
+                    build_plate_detector(s.anpr.detector, device)
+                )
+                self._plate_ocr = self._plate_ocr or LockedPlateOcr(
+                    build_plate_ocr(s.anpr.ocr, device)
+                )
+            except Exception as exc:
+                self._anpr_error = exc
+        if self._plate_det is None or self._plate_ocr is None:
+            return None
+        return self._plate_det, self._plate_ocr
+
+    def _event_sink(self, ev: EventRecord) -> None:
+        log.info("event %s (%s) on %s: %s", ev.rule, ev.severity, ev.camera_id, ev.payload)
+
+        def done(event_id: int | None) -> None:
+            ev.id = event_id
+            if self.emit is not None:
+                self.emit("event", ev.as_dict())
+
+        if self.db_writer is None:
+            done(None)
+        else:
+            self.db_writer.submit(lambda session: store_event(session, ev), done)
+
+    def reload_registry(self) -> int:
+        if self.registry_loader is None:
+            return len(self.plate_service.registry.plates)
+        try:
+            reg = self.registry_loader()
+        except Exception as exc:
+            log.error("vehicle registry load failed (%s)", exc)
+            return len(self.plate_service.registry.plates)
+        self.plate_service.set_registry(reg)
+        log.info("vehicle registry: %d plates", len(reg.plates))
+        return len(reg.plates)
 
     @property
     def detector(self) -> Detector:
@@ -334,6 +428,10 @@ class Engine:
             roles[st.role_state] = roles.get(st.role_state, 0) + 1
         out["identities"] = {"global_ids": len(self.global_tracker.identities), "roles": roles,
                              "gallery_people": len(self.identity.gallery)}  # fmt: skip
+        out["anpr"] = {"plates_decided": len(self.plate_service.recent),
+                       "registry": len(self.plate_service.registry.plates)}  # fmt: skip
+        if self.db_writer is not None:
+            out["db"] = {"writes": self.db_writer.done, "failures": self.db_writer.failures}
         return out
 
     def start(self) -> None:
@@ -345,6 +443,8 @@ class Engine:
             w.stop()
         if isinstance(self._detector, BatchingDetector):
             self._detector.close()
+        if self.db_writer is not None:
+            self.db_writer.close()
 
 
 class LockedFaceEncoder:
@@ -357,6 +457,54 @@ class LockedFaceEncoder:
     ) -> list[FaceSample | None]:
         with self._lock:
             return self.inner.faces_for(image, boxes)
+
+
+class LockedPlateDetector:
+    def __init__(self, inner: PlateDetector) -> None:
+        self.inner = inner
+        self._lock = threading.Lock()
+
+    def detect(self, image: np.ndarray) -> list[PlateBox]:
+        with self._lock:
+            return self.inner.detect(image)
+
+
+class LockedPlateOcr:
+    def __init__(self, inner: PlateOcr) -> None:
+        self.inner = inner
+        self._lock = threading.Lock()
+
+    def read(self, plates: list[np.ndarray]) -> list[OcrRead]:
+        with self._lock:
+            return self.inner.read(plates)
+
+
+def store_event(session: Session, ev: EventRecord) -> int:
+    row = DbEvent(
+        rule=ev.rule,
+        severity=ev.severity,
+        camera_id=ev.camera_id,
+        ts=datetime.fromtimestamp(ev.ts, UTC),
+        global_id=None,  # global ids become DB rows in P6 (indexer); kept in the payload meanwhile
+        plate_read_id=ev.plate_read_id,
+        payload={**ev.payload, "rule_type": ev.rule_type, "global_id": ev.global_id},
+    )
+    session.add(row)
+    session.flush()
+    return row.id
+
+
+def db_registry_loader(config: Config) -> Callable[[], Registry]:
+    from app.anpr.service import load_registry
+    from app.db.session import make_engine
+
+    db = make_engine(config.settings.database)
+
+    def load() -> Registry:
+        with Session(db) as session:
+            return load_registry(session, config.settings.anpr.registry_max_distance)
+
+    return load
 
 
 def db_gallery_loader(config: Config) -> Callable[[], Gallery]:
@@ -401,7 +549,22 @@ def engine_main(
     def reply(req_id: str, payload: dict[str, Any]) -> None:
         out_q.put(("result", req_id, payload), timeout=10)  # results must not be dropped
 
-    engine = Engine(config, publish, camera_ids, gallery_loader=db_gallery_loader(config))
+    def emit(kind: str, payload: dict[str, Any]) -> None:
+        try:
+            out_q.put((kind, payload), timeout=5)  # events/plates: block briefly rather than drop
+        except queue.Full:
+            log.error("API not draining; dropped %s", kind)
+
+    from app.db.session import make_engine
+    from app.db.sync import sync_cameras
+
+    writer = DbWriter(make_engine(config.settings.database))
+    writer.submit(lambda session: sync_cameras(session, config.cameras))
+    engine = Engine(
+        config, publish, camera_ids,
+        gallery_loader=db_gallery_loader(config), registry_loader=db_registry_loader(config),
+        db_writer=writer, emit=emit,
+    )  # fmt: skip
     engine.start()
     next_stats = time.monotonic()
     try:
@@ -430,6 +593,8 @@ def handle_command(
     try:
         if cmd == "reload_gallery":
             reply(req_id, {"people": engine.reload_gallery()})
+        elif cmd == "reload_registry":
+            reply(req_id, {"plates": engine.reload_registry()})
         elif cmd == "enroll_capture":
             engine.start_capture(
                 args["camera_id"], args["seconds"], args["shots"], lambda r: reply(req_id, r)
@@ -453,6 +618,14 @@ class FrameHub:
         self._lock = threading.Lock()
         self._frames: dict[str, tuple[int, float, bytes, dict[str, Any]]] = {}
         self.stats: dict[str, Any] = {}
+        self.events: deque[dict[str, Any]] = deque(maxlen=500)
+        self.plates: deque[dict[str, Any]] = deque(maxlen=500)
+        self.listeners: list[Callable[[str, dict[str, Any]], None]] = []  # WebSocket fan-out (P8)
+
+    def push(self, kind: str, payload: dict[str, Any]) -> None:
+        (self.events if kind == "event" else self.plates).appendleft(payload)
+        for cb in list(self.listeners):
+            cb(kind, payload)
 
     def put(self, camera_id: str, jpeg: bytes, meta: dict[str, Any]) -> None:
         with self._lock:
@@ -502,6 +675,8 @@ class EngineProcess:
                 self.hub.put(cam, jpeg, meta)
             elif msg[0] == "stats":
                 self.hub.stats = msg[1]
+            elif msg[0] in ("event", "plate"):
+                self.hub.push(msg[0], msg[1])
             elif msg[0] == "result":
                 pending = self._pending.get(msg[1])
                 if pending is not None:

@@ -225,6 +225,32 @@ class GlobalTrackerSettings(StrictModel):
     gallery_size: int = Field(20, ge=1)
 
 
+class PlateDetectorSettings(StrictModel):
+    backend: Literal["oim", "yolo"] = "oim"
+    model: str = "yolo-v9-t-640-license-plate-end2end"
+    weights: Path | None = None
+    conf: float = Field(0.3, ge=0.0, le=1.0)
+
+
+class PlateOcrSettings(StrictModel):
+    model: str = "cct-s-v2-global-model"
+    onnx_path: Path | None = None
+    config_path: Path | None = None
+
+
+class AnprSettings(StrictModel):
+    vehicle_labels: list[str] = Field(default_factory=lambda: ["car", "motorcycle", "bus", "truck"])
+    detector: PlateDetectorSettings = PlateDetectorSettings()
+    ocr: PlateOcrSettings = PlateOcrSettings()
+    sample_every: int = Field(3, ge=1)
+    min_plate_height_px: int = Field(14, ge=1)
+    min_char_conf: float = Field(0.4, ge=0.0, le=1.0)
+    min_reads: int = Field(3, ge=1)
+    min_share: float = Field(0.5, gt=0.0, le=1.0)
+    max_reads: int = Field(20, ge=1)
+    registry_max_distance: int = Field(1, ge=0)
+
+
 class Settings(StrictModel):
     app: AppSettings = AppSettings()
     server: ServerSettings = ServerSettings()
@@ -241,6 +267,7 @@ class Settings(StrictModel):
     reid: ReidSettings
     face: FaceSettings = FaceSettings()
     global_tracker: GlobalTrackerSettings = GlobalTrackerSettings()
+    anpr: AnprSettings = AnprSettings()
 
 
 # --------------------------------------------------------------------------- cameras.yaml
@@ -269,6 +296,7 @@ class Camera(StrictModel):
     enabled: bool = True
     # Processed dataset this camera comes from (GT + calibration under processed_dir/<dataset>/).
     dataset: str | None = None
+    anpr: bool = False  # read number plates of vehicles on this camera
     zones: list[Zone] = Field(default_factory=list)
     calibration: dict[str, Any] | None = None
 
@@ -408,6 +436,25 @@ def load_config(
         settings_raw = _apply_env_overrides(_read_yaml(cdir / "settings.yaml"), env)
         settings = Settings.model_validate(settings_raw)
         settings = settings.model_copy(update={"paths": settings.paths.resolved(root)})
+        anpr = settings.anpr
+        ocr_upd = {
+            k: root / v
+            for k, v in (("onnx_path", anpr.ocr.onnx_path), ("config_path", anpr.ocr.config_path))
+            if v is not None and not v.is_absolute()
+        }
+        det_upd = (
+            {"weights": root / anpr.detector.weights}
+            if anpr.detector.weights is not None and not anpr.detector.weights.is_absolute()
+            else {}
+        )
+        if ocr_upd or det_upd:
+            anpr = anpr.model_copy(
+                update={
+                    "ocr": anpr.ocr.model_copy(update=ocr_upd),
+                    "detector": anpr.detector.model_copy(update=det_upd),
+                }
+            )
+            settings = settings.model_copy(update={"anpr": anpr})
         if not settings.face.root.is_absolute():
             face = settings.face.model_copy(update={"root": root / settings.face.root})
             settings = settings.model_copy(update={"face": face})

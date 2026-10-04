@@ -154,3 +154,23 @@ global_tracker:
   max_speed_mps: 3.0              # walking-speed limit for non-overlapping sightings
   forget_after_s: 600             # identities unseen this long are no longer matched
   gallery_size: 20                # embeddings kept per identity
+
+# Number plates (P5). Cameras opt in with `anpr: true` in cameras.yaml.
+anpr:
+  vehicle_labels: [car, motorcycle, bus, truck]
+  detector:
+    backend: oim                    # oim (pretrained YOLOv9 ONNX) | yolo (fine-tuned Ultralytics)
+    model: yolo-v9-t-640-license-plate-end2end
+    weights: null                   # for backend yolo, e.g. models/plates/yolo26n_plates.pt
+    conf: 0.3
+  ocr:
+    model: cct-s-v2-global-model    # fast-plate-ocr hub model
+    onnx_path: null                 # fine-tuned model from notebooks/train_plate.ipynb
+    config_path: null
+  sample_every: 3                   # frames between plate reads of one vehicle track
+  min_plate_height_px: 14
+  min_char_conf: 0.4                # reads with any character below this are discarded
+  min_reads: 3                      # agreeing reads needed before a plate is decided
+  min_share: 0.5                    # share of the vote the winner needs
+  max_reads: 20
+  registry_max_distance: 1          # edit distance for "likely registered (verify)"
