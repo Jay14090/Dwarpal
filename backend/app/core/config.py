@@ -27,6 +27,7 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "LLM_PROVIDER": ("llm", "provider"),
     "LLM_MODEL": ("llm", "model"),
     "LLM_API_KEY": ("llm", "api_key"),
+    "LLM_BASE_URL": ("llm", "base_url"),
 }
 
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9_]*$")
@@ -46,6 +47,7 @@ class StrictModel(BaseModel):
 class AppSettings(StrictModel):
     name: str = "dwarpal"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    timezone: str = "Asia/Kolkata"
 
 
 class ServerSettings(StrictModel):
@@ -125,11 +127,13 @@ class LLMSettings(StrictModel):
     provider: str = ""
     model: str = ""
     api_key: str = Field("", repr=False)
+    base_url: str = ""
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
     timeout_s: int = Field(10, ge=1)
 
     @property
     def enabled(self) -> bool:
-        return bool(self.provider and self.model)
+        return bool(self.provider)
 
 
 class SmartSpacesSettings(StrictModel):
@@ -251,6 +255,22 @@ class AnprSettings(StrictModel):
     registry_max_distance: int = Field(1, ge=0)
 
 
+class ClipSettings(StrictModel):
+    model: str = "ViT-B-32"
+    pretrained: str = "laion2b_s34b_b79k"
+    fallback_url: str = ""
+    cache_dir: Path = Path("models/clip")
+    top_k: int = Field(3, ge=1)
+
+
+class IndexSettings(StrictModel):
+    crops_per_track: int = Field(5, ge=1)
+    crop_every: int = Field(5, ge=1)
+    min_track_seconds: float = Field(1.0, ge=0)
+    max_track_seconds: float = Field(120, gt=0)
+    thumb_height: int = Field(192, ge=32)
+
+
 class Settings(StrictModel):
     app: AppSettings = AppSettings()
     server: ServerSettings = ServerSettings()
@@ -268,6 +288,8 @@ class Settings(StrictModel):
     face: FaceSettings = FaceSettings()
     global_tracker: GlobalTrackerSettings = GlobalTrackerSettings()
     anpr: AnprSettings = AnprSettings()
+    clip: ClipSettings = ClipSettings()
+    index: IndexSettings = IndexSettings()
 
 
 # --------------------------------------------------------------------------- cameras.yaml
@@ -350,6 +372,7 @@ RuleType = Literal[
 
 class RuleDefaults(StrictModel):
     cooldown_s: int = Field(300, ge=0)
+    presence_gap_s: float = Field(10.0, gt=0)  # unseen this long in a zone = left it
 
 
 class Rule(StrictModel):
@@ -436,6 +459,14 @@ def load_config(
         settings_raw = _apply_env_overrides(_read_yaml(cdir / "settings.yaml"), env)
         settings = Settings.model_validate(settings_raw)
         settings = settings.model_copy(update={"paths": settings.paths.resolved(root)})
+        if not settings.clip.cache_dir.is_absolute():
+            settings = settings.model_copy(
+                update={
+                    "clip": settings.clip.model_copy(
+                        update={"cache_dir": root / settings.clip.cache_dir}
+                    )
+                }
+            )
         anpr = settings.anpr
         ocr_upd = {
             k: root / v

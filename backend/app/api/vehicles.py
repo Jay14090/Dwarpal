@@ -1,4 +1,4 @@
-"""Vehicle registry, plate reads and recent events."""
+"""Vehicle registry and plate reads."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.anpr.normalize import normalize
 from app.api.deps import actor, db_session
-from app.db.models import AuditLog, Event, PlateRead, Vehicle
+from app.db.models import AuditLog, PlateRead, Vehicle
 
 router = APIRouter(tags=["vehicles"])
 
@@ -138,28 +138,3 @@ def plate_thumb(read_id: int, session: Annotated[Session, Depends(db_session)]) 
     if r is None or not r.thumb_path or not Path(r.thumb_path).is_file():
         raise HTTPException(404, "no thumbnail")
     return Response(Path(r.thumb_path).read_bytes(), media_type="image/jpeg")
-
-
-@router.get("/events")
-def events(
-    session: Annotated[Session, Depends(db_session)],
-    limit: Annotated[int, Query(ge=1, le=500)] = 50,
-    rule: str | None = None,
-) -> list[dict[str, Any]]:
-    q = select(Event).order_by(Event.ts.desc()).limit(limit)
-    if rule:
-        q = q.where(Event.rule == rule)
-    return [
-        {
-            "id": e.id,
-            "rule": e.rule,
-            "severity": e.severity,
-            "camera_id": e.camera_id,
-            "ts": e.ts.isoformat(),
-            "global_id": e.payload.get("global_id"),
-            "plate_read_id": e.plate_read_id,
-            "payload": e.payload,
-            "acknowledged": e.acknowledged,
-        }
-        for e in session.scalars(q)
-    ]

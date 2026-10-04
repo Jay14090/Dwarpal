@@ -23,6 +23,7 @@ from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -39,16 +40,18 @@ from app.core.device import resolve_device
 from app.core.logging import setup_logging
 from app.datasets.common import Calibration
 from app.db.models import Event as DbEvent
+from app.db.track_store import TrackStore, upsert_identity
 from app.events import EventBus, EventRecord
 from app.pipeline.annotate import Annotator
 from app.pipeline.cache import TrackCache, cache_path
+from app.pipeline.clip import ClipEncoder
 from app.pipeline.crosscam import CrossCameraHook, ReidCache, reid_cache_path
 from app.pipeline.detector import Detector, YoloDetector
 from app.pipeline.face import FaceEncoder, FaceSample, build_face_encoder
 from app.pipeline.frames import Detections
 from app.pipeline.global_tracker import GlobalTracker
 from app.pipeline.identity import Gallery, IdentityEngine
-from app.pipeline.indexer import DbWriter
+from app.pipeline.indexer import DbWriter, FinishedTrack, ImageEncoder, TrackIndexer
 from app.pipeline.person_hooks import (
     EnrollmentCollector,
     FaceHook,
@@ -60,6 +63,7 @@ from app.pipeline.reid import ReidEncoder, build_encoder
 from app.pipeline.sources import open_source
 from app.pipeline.tracker import ByteTracker
 from app.pipeline.worker import CameraWorker, FrameHook, PublishFn
+from app.rules import RulesEngine, RulesHook
 
 log = logging.getLogger(__name__)
 
@@ -165,12 +169,18 @@ class Engine:
         registry_loader: Callable[[], Registry] | None = None,
         db_writer: DbWriter | None = None,
         emit: Callable[[str, dict[str, Any]], None] | None = None,
+        clip_encoder: ImageEncoder | None = None,
+        track_sink: Callable[[FinishedTrack], None] | None = None,
+        global_start_id: int = 1,
     ) -> None:
         self.config = config
         s = config.settings
         self.emit = emit
         self.db_writer = db_writer
         self.event_bus = EventBus(config.rules, self._event_sink)
+        self.rules_engine = RulesEngine(
+            config.rules, self.event_bus, s.app.timezone, config.rules.defaults.presence_gap_s
+        )
         self._plate_det = plate_detector
         self._plate_ocr = plate_ocr
         self._anpr_error: Exception | None = None
@@ -189,8 +199,27 @@ class Engine:
         self._face_error: Exception | None = (
             None if s.face.enabled else RuntimeError("face.enabled=false")
         )
-        self.global_tracker = global_tracker or GlobalTracker(s.global_tracker, s.reid.max_samples)
+        self.global_tracker = global_tracker or GlobalTracker(
+            s.global_tracker, s.reid.max_samples, global_start_id
+        )
         self.identity = identity or IdentityEngine(s.identity)
+        self._clip: ImageEncoder | None = LockedClip(clip_encoder) if clip_encoder else None
+        self._clip_error: Exception | None = None
+        self.track_store = (
+            TrackStore(db_writer, s.paths.thumbs_dir) if db_writer is not None else None
+        )
+        self.track_sink = track_sink or (self.track_store.store if self.track_store else None)
+        self.indexers: list[TrackIndexer] = []
+        if self.track_store is not None:
+            store = self.track_store
+            self.global_tracker.new_identity_listeners.append(
+                lambda ident: store.identity_created(ident.id, ident.first_seen)
+            )
+            self.identity.listeners.append(
+                lambda st, prev, ts: store.identity_changed(
+                    st.global_id, st.role_state, st.person_id, ts
+                )
+            )
         self.gallery_loader = gallery_loader
         self.reload_gallery()
         self.collectors: list[tuple[CameraWorker, EnrollmentCollector]] = []
@@ -249,7 +278,9 @@ class Engine:
             encoder = self.encoder
             if encoder is None:
                 log.error("%s: Re-ID unavailable (%s); no global IDs", cam.id, self._encoder_error)
-                return self.plate_hooks(cam, cached, fps) if cam.anpr else []
+                return (self.plate_hooks(cam, cached, fps) if cam.anpr else []) + self.index_hooks(
+                    cam, fps
+                )
         # A local track lost for longer than the tracker keeps it is over.
         grace_s = s.pipeline.tracker.track_buffer / max(fps, 1.0) + 0.5
         hooks: list[FrameHook] = [
@@ -263,9 +294,38 @@ class Engine:
         elif not cached and self.face_encoder is not None:
             hooks.append(FaceHook(cam.id, s.face, encoder=self.face_encoder))
         hooks.append(IdentityHook(self.identity))
+        hooks.append(RulesHook(cam, self.rules_engine))
         if cam.anpr:
             hooks.extend(self.plate_hooks(cam, cached, fps))
+        hooks.extend(self.index_hooks(cam, fps))
         return hooks
+
+    def index_hooks(self, cam: Camera, fps: float) -> list[FrameHook]:
+        if self.track_sink is None:
+            return []
+        s = self.config.settings
+        indexer = TrackIndexer(
+            cam, s.index, self.track_sink, clip=self.clip_encoder, clip_top_k=s.clip.top_k,
+            calibration=load_calibration_for(cam, self.config),
+            grace_frames=int(s.pipeline.tracker.track_buffer + fps),
+        )  # fmt: skip
+        self.indexers.append(indexer)
+        return [indexer]
+
+    @property
+    def clip_encoder(self) -> ImageEncoder | None:
+        if self._clip is None and self._clip_error is None:
+            s = self.config.settings
+            try:
+                self._clip = LockedClip(
+                    ClipEncoder(s.clip, resolve_device(s.device), s.half_precision)
+                )
+            except Exception as exc:
+                log.error(
+                    "CLIP unavailable (%s); tracks are indexed without search embeddings", exc
+                )
+                self._clip_error = exc
+        return self._clip
 
     def plate_hooks(self, cam: Camera, cached: bool, fps: float) -> list[FrameHook]:
         s = self.config.settings
@@ -345,7 +405,8 @@ class Engine:
         if self.db_writer is None:
             done(None)
         else:
-            self.db_writer.submit(lambda session: store_event(session, ev), done)
+            thumbs = self.config.settings.paths.thumbs_dir
+            self.db_writer.submit(lambda session: store_event(session, ev, thumbs), done)
 
     def reload_registry(self) -> int:
         if self.registry_loader is None:
@@ -441,6 +502,8 @@ class Engine:
     def stop(self) -> None:
         for w in self.workers:
             w.stop()
+        for ix in self.indexers:
+            ix.flush()  # tracks still open when the engine stops are indexed too
         if isinstance(self._detector, BatchingDetector):
             self._detector.close()
         if self.db_writer is not None:
@@ -457,6 +520,20 @@ class LockedFaceEncoder:
     ) -> list[FaceSample | None]:
         with self._lock:
             return self.inner.faces_for(image, boxes)
+
+
+class LockedClip:
+    def __init__(self, inner: ImageEncoder) -> None:
+        self.inner = inner
+        self._lock = threading.Lock()
+
+    def embed_images(self, crops: list[np.ndarray]) -> np.ndarray:
+        with self._lock:
+            return self.inner.embed_images(crops)
+
+    def embed_text(self, texts: list[str]) -> np.ndarray:
+        with self._lock:
+            return self.inner.embed_text(texts)  # type: ignore[attr-defined]
 
 
 class LockedPlateDetector:
@@ -479,19 +556,30 @@ class LockedPlateOcr:
             return self.inner.read(plates)
 
 
-def store_event(session: Session, ev: EventRecord) -> int:
+def store_event(session: Session, ev: EventRecord, thumbs_dir: Path | None = None) -> int:
+    if ev.global_id is not None:  # the identity row normally exists already (TrackStore)
+        upsert_identity(session, ev.global_id, ev.ts)
     row = DbEvent(
         rule=ev.rule,
         severity=ev.severity,
         camera_id=ev.camera_id,
         ts=datetime.fromtimestamp(ev.ts, UTC),
-        global_id=None,  # global ids become DB rows in P6 (indexer); kept in the payload meanwhile
+        global_id=ev.global_id,
         plate_read_id=ev.plate_read_id,
         payload={**ev.payload, "rule_type": ev.rule_type, "global_id": ev.global_id},
     )
     session.add(row)
     session.flush()
+    if ev.thumb_jpeg is not None and thumbs_dir is not None:
+        path = event_thumb_path(thumbs_dir, row.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(ev.thumb_jpeg)
+        row.payload = {**row.payload, "thumb": True}
     return row.id
+
+
+def event_thumb_path(thumbs_dir: Path, event_id: int) -> Path:
+    return thumbs_dir / "events" / f"{event_id}.jpg"
 
 
 def db_registry_loader(config: Config) -> Callable[[], Registry]:
@@ -557,13 +645,20 @@ def engine_main(
 
     from app.db.session import make_engine
     from app.db.sync import sync_cameras
+    from app.db.track_store import next_global_id
 
-    writer = DbWriter(make_engine(config.settings.database))
+    db = make_engine(config.settings.database)
+    writer = DbWriter(db)
     writer.submit(lambda session: sync_cameras(session, config.cameras))
+    try:
+        with Session(db) as session:
+            start_id = next_global_id(session)
+    except Exception:
+        start_id = 1
     engine = Engine(
         config, publish, camera_ids,
         gallery_loader=db_gallery_loader(config), registry_loader=db_registry_loader(config),
-        db_writer=writer, emit=emit,
+        db_writer=writer, emit=emit, global_start_id=start_id,
     )  # fmt: skip
     engine.start()
     next_stats = time.monotonic()
@@ -604,6 +699,12 @@ def handle_command(
                 cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR) for b in args["images"]
             ]
             reply(req_id, engine.embed_images([i for i in imgs if i is not None]))
+        elif cmd == "embed_text":
+            clip = engine.clip_encoder
+            if clip is None:
+                reply(req_id, {"error": "CLIP is not available"})
+            else:
+                reply(req_id, {"vectors": clip.embed_text(args["texts"]).tolist()})  # type: ignore[attr-defined]
         else:
             reply(req_id, {"error": f"unknown command {cmd}"})
     except Exception as exc:

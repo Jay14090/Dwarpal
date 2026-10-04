@@ -32,4 +32,11 @@ def test_health_ok_after_migrations(config, migrated_db_url):
     assert body["status"] == "ok"
     assert body["database"]["status"] == "ok"
     assert body["database"]["pgvector"]
-    assert body["database"]["revision"] == "0001"
+    from alembic.script import ScriptDirectory
+
+    from .conftest import alembic_cfg
+
+    assert (
+        body["database"]["revision"]
+        == ScriptDirectory.from_config(alembic_cfg(migrated_db_url)).get_current_head()
+    )

@@ -27,9 +27,13 @@ class EventRecord:
     plate_read_id: int | None = None
     payload: dict[str, Any] = field(default_factory=dict)
     id: int | None = None  # set once stored
+    thumb_jpeg: bytes | None = field(default=None, repr=False)  # person crop (rules engine)
 
     def as_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("thumb_jpeg")
+        d["has_thumb"] = self.thumb_jpeg is not None
+        return d
 
 
 Sink = Callable[[EventRecord], None]
@@ -65,6 +69,7 @@ class EventBus:
         plate_read_id: int | None = None,
         payload: dict[str, Any] | None = None,
         rule_filter: Callable[[Rule], bool] | None = None,
+        thumb_jpeg: bytes | None = None,
     ) -> list[EventRecord]:
         ts = time.time() if ts is None else ts
         out = []
@@ -82,6 +87,7 @@ class EventBus:
                 global_id,
                 plate_read_id,
                 dict(payload or {}),
+                thumb_jpeg=thumb_jpeg,
             )
             self.sink(ev)
             out.append(ev)

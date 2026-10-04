@@ -362,3 +362,148 @@ Verified here (sandbox, CPU):
   low-confidence reads ignored, a leaving track settles its vote), identical decisions from cached replay, unregistered
   event cooldown, stream labels (`MH12AB1234 UNREG`), plate read + event rows in Postgres, an ANPR camera in a live
   engine emitting plate and event messages, the vehicles/plates/events API, and the gate-clip adapter.
+
+## P6 Attributes + indexing
+
+### Plan
+- `pipeline/attributes.py`: upper/lower clothing colour. The person box is split (torso 15–50 %, legs 55–90 %,
+  central half of the width). Dominant colour comes from k-means in HSV (circular hue), mapped to 11 names, and
+  each track votes over its best 5 crops weighted by crop quality.
+- `pipeline/height.py`: the box foot point goes to the ground plane through the calibration, the head point
+  comes from projection, and the result is the median ± MAD over the track (minimum ±2 cm, 120–220 cm). A camera
+  without calibration stores null.
+- `pipeline/clip.py`: OpenCLIP ViT-B/32 (LAION-2B) embeddings, the mean of the top-k quality crops per track,
+  plus `embed_text` for search.
+- `pipeline/indexer.py` (`TrackIndexer` hook) closes a track when the tracker drops it and writes
+  `tracks` (colours, height, zones visited, role, frame range), `track_embeddings` (CLIP + body),
+  `global_identities` and a thumbnail through the background `DbWriter`.
+- Migration `0002`: `tracks.role`, `tracks.zones` (jsonb), `start_frame/end_frame` and HNSW cosine indexes.
+- `scripts/index_tracks.py` (`make index-db`): replays cached cameras through the same hooks into Postgres.
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D38 | CLIP weights come from Hugging Face, else the OpenCLIP GitHub release (`vit_b_32-laion2b_e16`) | HF is blocked in the sandbox; same architecture and training data |
+| D39 | Added indoor MEVA cameras G421 ("Clubhouse cafe") and G299 ("Clubhouse gym"), same 13:50 slot, **disabled** by default | The outdoor cameras gave only 8 person tracks, too few for the 20-track spot-check; indoor people are 60–280 px tall |
+| D40 | The lower-body colour drops pixels that match the box's side strips (background) before k-means; the upper body does not | Spot-check (below): legs are thin and the wooden gym floor made "yellow pants". Filtering the torso too removed real clothing pixels (2 regressions on the same crops) |
+
+### Spot-check: 20 tracks for colour correctness (DoD)
+20 random tracks (seed 6) from MEVA G299/G421/G336, judged by eye from each track's best crop
+(contact sheet: `docs/img/p6_color_spotcheck.jpg`). These were judged against the crops, not against ground truth;
+MEVA has no clothing labels.
+
+| | before D40 | after D40 |
+|---|---|---|
+| Upper correct (of 19 judgeable; 1 box holds two people) | 16 (84 %) | 16 (84 %) |
+| Lower correct (of 18; legs hidden behind a table on 2) | 14 (78 %) | 17 (94 %), or 16 (89 %) counting dark denim → "black" as wrong |
+
+- Errors left: red tops in crowded boxes read as black (the dark person behind dominates; 2 cases), a
+  light-blue shirt reads as green (1), and light trousers read as black (1).
+- **Caveat:** this footage is mostly dark clothing, so an "always black" guess scores 53 % upper and about 90 % lower.
+  The lower-body number therefore says little on this clip. SmartSpaces has more varied clothing; re-run the
+  spot-check there.
+- Height: MEVA cameras are uncalibrated here, so `height_cm` is null (by design). It is tested with the real
+  SmartSpaces calibration fixture.
+
+### Status
+Done. 177 tracks are indexed (G336 8, G421 8, G299 161) with colours, CLIP and thumbnails; `make index-db` runs at
+about 55 frames/s per camera (CPU, CLIP included). G299 fragments heavily: 161 tracks in 5 minutes of a crowded gym
+with `yolo26n` on CPU.
+
+## P7 Natural-language search
+
+### Plan
+- `search/parser.py`: a strict `SearchFilter` (pydantic, `extra=forbid`) with `{entity, roles[], upper_color,
+  lower_color, height_cm{min,max}, cameras[], zones[], time_range{from,to}, plate, free_text}`.
+  - **RuleParser** (always available): plate regex + Indian normalization; time phrases in `app.timezone`
+    (today, yesterday, after/before/between/around X, last N hours/minutes, morning/evening/night); heights
+    ("six foot" → 175–190, 5'8", 180 cm, tall/short); colour words bound to the nearest garment (a lone colour is
+    upper); roles and synonyms; camera names and multi-word zone names matched first ("resident parking" is a
+    place, not a role); the leftover appearance words become `free_text`.
+  - **LlmParser**, provider-agnostic. `LLM_PROVIDER=anthropic` uses the official `anthropic` SDK with structured
+    outputs (`messages.parse(output_format=SearchFilter)`, default model `claude-opus-5-5`, `output_config.effort`
+    from settings, refusal check). `openai` speaks any OpenAI-compatible endpoint (`LLM_BASE_URL`: OpenAI, Groq,
+    Ollama, …) in JSON mode. The output is validated against the same schema, and **any failure falls back to the
+    rules**. Only the query text, camera/zone names and the current time are sent.
+- `search/retrieval.py`: SQL filters (identity role, colours, height band ± error, cameras, zones `?|`, time
+  overlap) ranked by pgvector cosine distance to the CLIP text embedding of `free_text`. If colour filters leave
+  nothing, they are relaxed and the response says so. Vehicles search `plate_reads`: exact plate first, then edit
+  distance 1; status from roles; a zone narrows to the cameras that contain it.
+- API: `POST/GET /search`, `POST /search/parse`, `GET /tracks/{id}/thumb.jpg`, and `GET /tracks/{id}/clip.mp4`
+  (an ffmpeg cut of the track window ± 1 s, cached). The CLIP text embedding comes from the engine process
+  (`embed_text` command) or, if the engine is off, a lazily loaded local encoder.
+- `tests/search_queries.yaml`: 18 queries with expected filters at a fixed "now".
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D41 | The rule parser is the default; the LLM is opt-in through env (`LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_BASE_URL`) | CLAUDE.md requires working search with no key; nothing leaves the machine unless configured |
+| D42 | Colour filters are hard, but they are relaxed (and flagged) when they would return nothing and there is free text | Colour estimates are wrong about 15 % of the time (P6); CLIP still ranks the right person first (spot-check query 2) |
+| D43 | Role filters use the identity's *current* role (`global_identities.role_state`), falling back to the track's | An enrollment after the fact should make old footage searchable as resident |
+| D44 | Clips are cut only for file cameras; the webcam keeps no recording | Privacy by design; there's nothing to cut from a live stream |
+
+### Status
+Done. All 18 queries in `tests/search_queries.yaml` parse to the expected filters (`make search-check`). The
+Anthropic and OpenAI-compatible paths are tested with mocked clients (structured-output call, refusal → rules,
+schema-violating JSON → rules); no real LLM call was made here (no key). Retrieval and API are tested in Postgres
+with pgvector ranking, relaxation, exact and fuzzy plates, and clip cutting.
+
+**Top-5 spot-check** on the indexed MEVA tracks (rule parser + CLIP, `docs/img/p7_search_spotcheck.jpg`),
+relevant results by eye:
+
+| Query | Relevant in top 5 |
+|---|---|
+| person in a blue denim jacket | 3 (blue tops; 1 actually denim) |
+| man in a white shirt sitting at a table | 4 (colour relaxed; same man in 4 track fragments) |
+| woman in a red top | 3 |
+| person wearing a hat | 3 |
+| person in a light blue shirt | 2 |
+| someone in a long black coat | 3 (all 5 wear black outerwear) |
+
+That's 18/30 (60 %) relevant. CLIP ViT-B/32 on small, low-light CCTV crops is the limit; scores sit in a narrow
+0.30–0.39 band.
+
+## P8 Rules + events
+
+### Plan
+- `app/rules.py`: `RulesEngine`, shared by all cameras, plus a per-camera `RulesHook` after `IdentityHook`.
+  - A *presence* is kept per (person, zone); a person is their global id, or camera + track while unassigned.
+    A presence ends after `presence_gap_s` (10 s) unseen.
+  - Each rule fires **at most once per presence**, and the `EventBus` cooldown (per rule, per person, 300 s)
+    blocks re-alerts on quick re-entry.
+  - Rules:
+    - `unknown_in_zone`
+    - `loitering` (dwell ≥ `min_dwell_s`)
+    - `after_hours` (local-time window that may cross midnight; non-staff by default)
+    - `tailgating` (stretch: an unknown person enters within `window_s` after a resident or staff; disabled)
+  - `params.roles` picks the identity states a rule applies to; `pending` never triggers by default.
+- Events get a person-crop thumbnail (`thumbs/events/{id}.jpg`), a real `global_id` FK (the identity is
+  upserted), and the payload `{zone, role, track_id, dwell_s}`.
+- API (`api/events.py`): `GET /events` (filter by rule, `unacknowledged`), `POST /events/{id}/ack` (audited),
+  `GET /events/{id}/thumb.jpg`, and `WS /ws/events`, which fans out engine events and plate reads through
+  `FrameHub.listeners` with a per-client queue that detects disconnects.
+- `scripts/replay_events.py` (`make events-replay`) replays cached cameras through identity + rules. Next to the
+  rules engine it keeps an independent presence tally, and it checks (1) no incident gets two alerts of the same
+  rule and (2) no cooldown violation. `GET /metrics` serves the saved reports only.
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D45 | One alert per incident (continuous presence), on top of the per-person cooldown | A cooldown alone re-fires every 5 minutes on someone who stays 20 minutes |
+| D46 | `pending` people never trigger rules unless a rule lists `pending` in `params.roles` | The identity state machine exists to avoid false unknown alerts. Note: on far cameras (MEVA outdoor people are 30–47 px, below the 64 px Re-ID quality floor) nobody resolves, so those cameras alert only if you opt in |
+| D47 | The MEVA G328 `reid.npz` was an empty leftover of an aborted run (older than `tracks.npz`) and was deleted | It hid every person from the global tracker |
+
+### Status
+DoD met on real footage. `make events-replay CAMERAS="meva_g421 meva_g299" REPLAY_ARGS="--reid-backend colorhist --no-db"`:
+- **Daytime** (clip clock): 6 people resolved to unknown. That gave 5 `unknown_in_restricted_zone` alerts (gym;
+  the sixth person was only in the unrestricted cafe) and 1 `loitering_unknown` at exactly 60 s dwell.
+  **0 incidents with more than one alert, 0 cooldown violations** (`data/eval/replay_events.json`).
+- **Night** (`--start 2026-10-04T22:30:00+05:30`): 11 alerts, made of 5 `after_hours_entry` + 5 unknown-in-zone +
+  1 loitering. Again one per person per rule, with 0 duplicates and 0 cooldown violations
+  (`data/eval/replay_events_night.json`).
+- **Caveat:** the colour-histogram Re-ID fallback (OSNet weights can't download here) merges about 160 gym
+  tracks into 6 global IDs, because most people wear dark clothes. That shows the once-per-incident property, but
+  **alert recall is not meaningful here**. Re-run with OSNet on your machine.
+- 11 rules-engine tests: once per incident over 200 s, detection gaps, cooldown on re-entry, dwell reset,
+  after-hours window across midnight, tailgating timing, role gating. Events API tests cover the global-id link,
+  thumbnail, idempotent audited ack, and WebSocket fan-out and cleanup.

@@ -145,8 +145,16 @@ class Track(Base):
     height_err_cm: Mapped[float | None] = mapped_column(Float)
     thumb_path: Mapped[str | None] = mapped_column(Text)
     quality: Mapped[float | None] = mapped_column(Float)
+    # P6 additions for search: role when the track ended, zones visited, file frame range
+    role: Mapped[str | None] = mapped_column(String(16))
+    zones: Mapped[list[Any]] = mapped_column(JSONB, server_default="[]")
+    start_frame: Mapped[int | None] = mapped_column(Integer)
+    end_frame: Mapped[int | None] = mapped_column(Integer)
 
-    __table_args__ = (Index("ix_tracks_camera_start", "camera_id", "start_ts"),)
+    __table_args__ = (
+        Index("ix_tracks_camera_start", "camera_id", "start_ts"),
+        Index("ix_tracks_start_ts", "start_ts"),
+    )
 
 
 class TrackEmbedding(Base):

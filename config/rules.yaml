@@ -1,9 +1,12 @@
-# Alert rules (engine lands in P8). Each rule fires at most once per global ID per cooldown.
+# Alert rules (backend/app/rules.py). A rule fires once per incident (a person's continuous
+# presence in a zone) and at most once per person (global ID) or plate per cooldown_s.
 # type: unknown_in_zone | unregistered_vehicle | loitering | after_hours | tailgating
-# zones: zone names from cameras.yaml; empty list = all restricted zones.
+# zones: zone names from cameras.yaml; empty list = the camera's restricted zones.
+# params.roles: identity states the rule applies to (pending people never trigger rules).
 
 defaults:
   cooldown_s: 300
+  presence_gap_s: 10   # unseen in a zone for this long = left it (next entry is a new incident)
 
 rules:
   - id: unknown_in_restricted_zone
@@ -38,3 +41,6 @@ rules:
     type: tailgating
     enabled: false
     severity: medium
+    zones: []
+    params:
+      window_s: 3

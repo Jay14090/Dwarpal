@@ -63,3 +63,29 @@ cameras:
         restricted: false
         polygon: [[0.0, 0.1], [1.0, 0.1], [1.0, 1.0], [0.0, 1.0]]
     calibration: null
+
+  - id: meva_g421
+    name: Clubhouse cafe
+    source_type: file
+    source_uri: data/processed/meva/meva_g421.mp4
+    run_mode: cached
+    enabled: false
+    dataset: meva
+    zones:
+      - name: cafe
+        restricted: false
+        polygon: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+    calibration: null
+
+  - id: meva_g299
+    name: Clubhouse gym
+    source_type: file
+    source_uri: data/processed/meva/meva_g299.mp4
+    run_mode: cached
+    enabled: false
+    dataset: meva
+    zones:
+      - name: gym
+        restricted: true
+        polygon: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+    calibration: null

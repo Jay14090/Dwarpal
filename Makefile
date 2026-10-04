@@ -8,7 +8,7 @@ PORT    ?= 8000
 
 .DEFAULT_GOAL := help
 .PHONY: help setup env infra-up infra-down infra-logs migrate dev test lint fmt \
-        data data-meva data-smartspaces inspect streams streams-stop index enroll-sim gate plates-eval demo eval clean
+        data data-meva data-smartspaces inspect streams streams-stop index index-db search-check events-replay enroll-sim gate plates-eval demo eval clean
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -72,6 +72,15 @@ streams-stop: ## Stop the RTSP loopers
 
 index: ## Precompute tracked detections for cached-mode cameras (or run notebooks/colab_index.ipynb)
 	$(RUN) python scripts/index_cameras.py $(CAMERAS)
+
+index-db: ## Index cached cameras into Postgres for search: colours, height, CLIP (after make index)
+	$(RUN) python scripts/index_tracks.py $(if $(CAMERAS),--cameras $(CAMERAS)) --replace
+
+search-check: ## Parse every query in tests/search_queries.yaml and compare with the expected filters
+	$(RUN) pytest backend/tests/test_search.py -q -k rule_parser
+
+events-replay: ## Replay cached cameras through identity + rules; checks one alert per incident
+	$(RUN) python scripts/replay_events.py $(if $(CAMERAS),--cameras $(CAMERAS)) $(REPLAY_ARGS)
 
 demo: ## (P11) Start everything for the demo
 	@echo "make demo lands in P11"; exit 1

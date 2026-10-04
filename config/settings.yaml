@@ -5,6 +5,7 @@
 app:
   name: dwarpal
   log_level: INFO
+  timezone: Asia/Kolkata     # local time for search phrases like "after 9 pm"
 
 server:
   host: 0.0.0.0
@@ -74,10 +75,15 @@ privacy:
   require_consent: true
 
 # Natural-language search parser (P7). Empty provider -> rule-based fallback.
+# provider: anthropic (official SDK; model defaults to claude-opus-5-5) | openai (any
+# OpenAI-compatible endpoint: set base_url for Groq/Together/Ollama/...). Only the query text
+# is sent; no frames ever leave the machine.
 llm:
   provider: ""
   model: ""
   api_key: ""
+  base_url: ""
+  effort: low             # Claude effort for this small parsing task (lower latency)
   timeout_s: 10
 
 # Dataset subsets and the common processed format (P1). See docs/progress.md D11-D16.
@@ -96,7 +102,7 @@ datasets:
     video_prefix: drops-123-r13/2018-03-11/13
     annotation_prefix: examples/annotations/2018-03-11/13
     clip_prefix: "2018-03-11.13-50"
-    cameras: [school.G328, school.G336, school.G339]   # parking, school exterior/road, parking PTZ
+    cameras: [school.G328, school.G336, school.G339, school.G421, school.G299]   # parking, road, parking PTZ; cafe + gym (indoor, P6 spot-check)
     max_seconds: null
 
 # Per-camera pipeline (P2). Detector: Ultralytics YOLO26; tracker: ByteTrack.
@@ -174,3 +180,19 @@ anpr:
   min_share: 0.5                    # share of the vote the winner needs
   max_reads: 20
   registry_max_distance: 1          # edit distance for "likely registered (verify)"
+
+# CLIP image/text embeddings for natural-language search (P6/P7). 512-d (pgvector column size).
+clip:
+  model: ViT-B-32
+  pretrained: laion2b_s34b_b79k        # best ViT-B/32 tag (Hugging Face)
+  fallback_url: https://github.com/mlfoundations/open_clip/releases/download/v0.2-weights/vit_b_32-laion2b_e16-af8dbd0c.pth
+  cache_dir: models/clip
+  top_k: 3                             # best crops averaged per track
+
+# Track indexing into Postgres (P6).
+index:
+  crops_per_track: 5                   # best crops kept for colours / CLIP / thumbnail
+  crop_every: 5                        # frames between crop candidates of one track
+  min_track_seconds: 1.0               # shorter person tracks are not indexed (flicker)
+  max_track_seconds: 120               # long stays are split into segments so search stays fresh
+  thumb_height: 192

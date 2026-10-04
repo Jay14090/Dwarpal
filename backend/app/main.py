@@ -13,7 +13,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from app import __version__
-from app.api import cameras, health, people, vehicles
+from app.api import cameras, events, health, metrics, people, search, vehicles
 from app.core.config import Config, get_config
 from app.core.logging import setup_logging
 from app.db.session import make_engine
@@ -66,6 +66,9 @@ def create_app(
     app.include_router(cameras.router)
     app.include_router(people.router)
     app.include_router(vehicles.router)
+    app.include_router(search.router)
+    app.include_router(events.router)
+    app.include_router(metrics.router)
     return app
 
 

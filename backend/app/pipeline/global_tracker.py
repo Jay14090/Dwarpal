@@ -87,11 +87,14 @@ class GlobalIdentity:
 
 
 class GlobalTracker:
-    def __init__(self, cfg: GlobalTrackerSettings, max_samples: int = 10) -> None:
+    def __init__(
+        self, cfg: GlobalTrackerSettings, max_samples: int = 10, start_id: int = 1
+    ) -> None:
+        """`start_id`: first id to hand out (the engine continues after ids already in the DB)."""
         self.cfg = cfg
         self.max_samples = max_samples
         self._lock = threading.RLock()
-        self._ids = itertools.count(1)
+        self._ids = itertools.count(start_id)
         self.identities: dict[int, GlobalIdentity] = {}
         self.sightings: dict[tuple[str, int], Sighting] = {}
         self.new_identity_listeners: list = []

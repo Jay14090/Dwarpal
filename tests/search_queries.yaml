@@ -1,0 +1,106 @@
+# Natural-language search queries and the filter the parser must produce (CLAUDE.md section 4).
+# Checked by backend/tests/test_search.py against the rule-based parser (no API key needed).
+# Every SearchFilter field not listed under `expect` must keep its default (empty / null /
+# entity person), except free_text, which is only checked when given (`free_text` exact,
+# `free_text_contains` words). Times are resolved against `now` in Asia/Kolkata.
+now: "2026-10-04T22:30:00+05:30"
+queries:
+  - query: "guy in a green t-shirt, around six foot, near the gate after 9 pm"
+    expect:
+      upper_color: green
+      height_cm: {min: 175, max: 190}
+      zones: [gate_drive]
+      time_range: {from: "2026-10-04T21:00:00+05:30", to: "2026-10-05T00:00:00+05:30"}
+      free_text_contains: [green, t-shirt]
+  - query: "all unknown people today"
+    expect:
+      roles: [unknown]
+      time_range: {from: "2026-10-04T00:00:00+05:30", to: "2026-10-04T22:30:00+05:30"}
+      free_text: null
+  - query: "when did TN09AB1234 enter?"
+    expect:
+      entity: vehicle
+      plate: TN09AB1234
+  - query: "woman in red kurta and blue jeans in the parking yesterday evening"
+    expect:
+      upper_color: red
+      lower_color: blue
+      zones: [resident_parking, visitor_parking]
+      time_range: {from: "2026-10-03T17:00:00+05:30", to: "2026-10-03T21:00:00+05:30"}
+      free_text_contains: [kurta, jeans]
+  - query: "staff in the gym between 6 and 8 pm"
+    expect:
+      roles: [staff]
+      zones: [gym]
+      time_range: {from: "2026-10-04T18:00:00+05:30", to: "2026-10-04T20:00:00+05:30"}
+      free_text: null
+  - query: "tall stranger with a backpack in the last 2 hours"
+    expect:
+      roles: [unknown]
+      height_cm: {min: 180, max: null}
+      time_range: {from: "2026-10-04T20:30:00+05:30", to: "2026-10-04T22:30:00+05:30"}
+      free_text: backpack
+  - query: "unregistered cars at the main gate today"
+    expect:
+      entity: vehicle
+      roles: [unknown]
+      zones: [gate_drive]
+      time_range: {from: "2026-10-04T00:00:00+05:30", to: "2026-10-04T22:30:00+05:30"}
+  - query: "MH 12 DE 1433"
+    expect:
+      entity: vehicle
+      plate: MH12DE1433
+  - query: "22 BH 1234 AB"
+    expect:
+      entity: vehicle
+      plate: 22BH1234AB
+  - query: "residents in the cafe this morning"
+    expect:
+      roles: [resident]
+      zones: [cafe]
+      time_range: {from: "2026-10-04T06:00:00+05:30", to: "2026-10-04T12:00:00+05:30"}
+      free_text: null
+  - query: "person wearing black pants and white shirt"
+    expect:
+      upper_color: white
+      lower_color: black
+      free_text_contains: [shirt, pants]
+  - query: "security guard in a navy uniform before 7 am"
+    expect:
+      roles: [staff]
+      upper_color: blue
+      time_range: {from: "2026-10-04T00:00:00+05:30", to: "2026-10-04T07:00:00+05:30"}
+      free_text_contains: [uniform]
+  - query: "someone 5'8\" in grey hoodie"
+    expect:
+      upper_color: gray
+      height_cm: {min: 168, max: 178}
+      free_text_contains: [hoodie]
+  - query: "short visitor in yellow at the lobby"
+    expect:
+      roles: [unknown]
+      upper_color: yellow
+      height_cm: {min: null, max: 162}
+      zones: [lobby]
+      free_text_contains: [yellow]
+  - query: "people seen in the last 30 minutes"
+    expect:
+      time_range: {from: "2026-10-04T22:00:00+05:30", to: "2026-10-04T22:30:00+05:30"}
+      free_text: null
+  - query: "man with an umbrella around 8:30 pm yesterday"
+    expect:
+      time_range: {from: "2026-10-03T20:00:00+05:30", to: "2026-10-03T21:00:00+05:30"}
+      free_text_contains: [umbrella]
+  - query: "person 180 cm in brown jacket and khaki shorts in resident parking"
+    expect:
+      upper_color: brown
+      lower_color: brown
+      height_cm: {min: 175, max: 185}
+      cameras: [meva_g328]
+      zones: [resident_parking]
+      free_text_contains: [jacket, shorts]
+  - query: "intruders at night"
+    expect:
+      roles: [unknown]
+      time_range: {from: "2026-10-04T21:00:00+05:30", to: "2026-10-05T06:00:00+05:30"}
+      free_text: null
