@@ -82,7 +82,7 @@ def headline(eval_dir: Path) -> list[dict[str, Any]]:
     if ev:
         add("alerts_once", "Incidents alerted more than once", float(ev["incidents_with_more_than_one_alert"]),
             "replay_events.json", "make events-replay",
-            f"{ev['events']} alerts over {ev['incidents_eligible']} eligible incidents on {', '.join(ev['cameras'])}")  # fmt: skip
+            f"{ev['events']} alerts replayed on {', '.join(ev['cameras'])}; {ev['cooldown_violations']} cooldown violations")  # fmt: skip
     return out
 
 

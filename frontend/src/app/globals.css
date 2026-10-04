@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+/* Dark security-console theme (shadcn/ui token names, so `npx shadcn add` components fit in). */
+:root {
+  --radius: 0.5rem;
+  --background: oklch(0.155 0.01 250);
+  --foreground: oklch(0.93 0.01 250);
+  --card: oklch(0.195 0.012 250);
+  --card-foreground: var(--foreground);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+  --primary: oklch(0.78 0.14 200);
+  --primary-foreground: oklch(0.18 0.02 250);
+  --secondary: oklch(0.26 0.015 250);
+  --secondary-foreground: var(--foreground);
+  --muted: oklch(0.24 0.012 250);
+  --muted-foreground: oklch(0.66 0.02 250);
+  --accent: oklch(0.28 0.02 250);
+  --accent-foreground: var(--foreground);
+  --destructive: oklch(0.62 0.21 25);
+  --border: oklch(0.3 0.015 250);
+  --input: oklch(0.3 0.015 250);
+  --ring: oklch(0.78 0.14 200);
+  /* role colours: match the stream annotations (green resident, blue staff, red unknown, grey pending) */
+  --role-resident: oklch(0.74 0.17 150);
+  --role-staff: oklch(0.68 0.15 250);
+  --role-unknown: oklch(0.64 0.21 25);
+  --role-pending: oklch(0.65 0.01 250);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-resident: var(--role-resident);
+  --color-staff: var(--role-staff);
+  --color-unknown: var(--role-unknown);
+  --color-pending: var(--role-pending);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --font-sans: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Menlo, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+  }
+}

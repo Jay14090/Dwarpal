@@ -507,3 +507,41 @@ DoD met on real footage. `make events-replay CAMERAS="meva_g421 meva_g299" REPLA
 - 11 rules-engine tests: once per incident over 200 s, detection gaps, cooldown on re-entry, dwell reset,
   after-hours window across midnight, tailgating timing, role gating. Events API tests cover the global-id link,
   thumbnail, idempotent audited ack, and WebSocket fan-out and cleanup.
+
+## P9 Frontend
+
+### Plan
+- `frontend/`: Next.js 16 (App Router), TypeScript, Tailwind 4, and a dark security-console theme with shadcn/ui
+  token names. The five pages are client components talking to the FastAPI backend (CORS already allows
+  `localhost:3000`):
+  - `/live`: MJPEG tiles, per-camera role counts from `frame.json`, the WebSocket event feed, and webcam enrollment (consent checkbox required).
+  - `/search`: query box + examples, parsed filter chips, "relaxed" notice, thumbnail grid, clip player, plate rows.
+  - `/events`: history, rule filter, open-only, ack, live plate reads.
+  - `/registry`: people (thumbnail, samples, consent, delete), photo enrollment, vehicles CRUD with owners.
+  - `/metrics`: headline cards from `GET /metrics`, raw reports.
+- `lib/use-live-feed.ts`: WebSocket with exponential-backoff reconnect.
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D48 | shadcn/ui-style components are written by hand (`cva` + `tailwind-merge`, same API and tokens), and `components.json` is included | The shadcn registry (ui.shadcn.com) is blocked in the sandbox; `npx shadcn add …` works on your machine and fits the theme |
+| D49 | System font stacks, no `next/font/google` | Builds offline; nothing is fetched from Google ("everything runs locally") |
+| D50 | The browser talks to the API directly (`NEXT_PUBLIC_API_URL`) rather than through Next rewrites | MJPEG and WebSocket stream straight from FastAPI; no proxy buffering |
+
+### Status
+Done for everything that can run here. `make web-build` passes (tsc, eslint, `next build`, all routes). I drove
+every page with headless Chromium against the real backend, running 4 cached MEVA cameras with the rules engine on:
+- `/live`: 4 live tiles with boxes and role counts.
+- `/search`: "man in a white shirt sitting at a table" → parsed by rules, colour relaxed, CLIP-ranked; the same
+  seated man takes the top 4.
+- `/events`: thumbnails; Ack dimmed the row and wrote `audit_log`. A new `unknown_in_restricted_zone` alert
+  arrived over the WebSocket while the page was open.
+- `/registry`: adding "tn 09 ab 1234" stored `TN09AB1234`.
+- `/metrics`: real numbers or "not measured" with the command.
+
+No console errors, and no horizontal scroll at 390 px width. Screenshots: `docs/img/ui_*.jpg`.
+
+**Held for you:**
+- The webcam enrollment flip (unknown → resident) needs your webcam (`scripts/webcam_publish.ps1`).
+- Clip playback was checked with curl + ffprobe (H.264 720p), not in the browser: Playwright's Chromium has no
+  H.264 decoder, so check it in your browser.

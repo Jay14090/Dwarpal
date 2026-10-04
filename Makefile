@@ -8,7 +8,7 @@ PORT    ?= 8000
 
 .DEFAULT_GOAL := help
 .PHONY: help setup env infra-up infra-down infra-logs migrate dev test lint fmt \
-        data data-meva data-smartspaces inspect streams streams-stop index index-db search-check events-replay enroll-sim gate plates-eval demo eval clean
+        data data-meva data-smartspaces inspect streams streams-stop index index-db search-check events-replay web web-install web-build enroll-sim gate plates-eval demo eval clean
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -38,6 +38,15 @@ dev: infra-up ## Run the API with auto-reload on http://localhost:$(PORT)
 	$(RUN) alembic upgrade head
 	$(RUN) uvicorn app.main:app --reload --host $(HOST) --port $(PORT) \
 		--reload-dir backend/app --reload-dir config
+
+web-install: ## Install the dashboard's npm dependencies (frontend/)
+	cd frontend && npm install
+
+web: ## Run the Next.js dashboard on http://localhost:3000 (needs `make dev` for the API)
+	cd frontend && npm run dev
+
+web-build: ## Typecheck, lint and build the dashboard
+	cd frontend && npx tsc --noEmit && npm run lint && npm run build
 
 test: ## Run the test suite (DB tests skip if Postgres is down)
 	$(RUN) pytest
