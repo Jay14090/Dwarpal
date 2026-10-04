@@ -229,6 +229,7 @@ def test_engine_runs_realtime_file_camera(tmp_path, config):
         cfg, lambda c, j, m: got.append(m), detector=BrightBoxDetector(), encoder=ColorHistEncoder()
     )
     eng.start()
+
     def has_gid() -> bool:
         return any(t["global_id"] == 1 for m in list(got) for t in m["tracks"])
 

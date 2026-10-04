@@ -190,3 +190,54 @@ absent (now backs off and warns once per outage); the publish throttle delivered
 The engine also wires in the P3 Re-ID/global-ID hooks (`pipeline/crosscam.py`,
 `pipeline/global_tracker.py`). Without Re-ID weights they log one error and the camera runs without
 global IDs; P3 below covers them.
+
+## P3 Cross-camera global IDs
+
+### Plan
+- `pipeline/reid.py`: `ReidEncoder` interface. `OsnetEncoder` uses the **vendored torchreid OSNet**
+  architecture (`app/vendor/osnet.py`, MIT) and loads official checkpoints (`osnet_x1_0_msmt17.pt`,
+  downloaded via gdown from the torchreid model zoo). `ColorHistEncoder` is a weak fallback for tests.
+  `crop_quality()` scores size, confidence, border truncation, aspect and occlusion.
+- `pipeline/crosscam.py`: `CrossCameraHook`, per camera. It samples person tracks every
+  `sample_every` frames above `min_quality`, embeds them (realtime/index) or reads `reid.npz` (cached),
+  and projects foot points to the ground plane with the camera calibration.
+- `pipeline/global_tracker.py`: online `GlobalTracker` shared by all cameras (rules in the module docstring):
+  same-camera exclusivity, `same_place_m` agreement for concurrent calibrated sightings (plus a
+  position bonus), and a `max_speed_mps` travel-time limit. Appearance is mean top-3 cosine to the
+  identity gallery.
+- `make index` stores Re-ID samples next to the tracks, so cached replay feeds the live global tracker exactly as realtime would.
+- `app/eval/metrics.py` (IDF1/IDP/IDR, Ristani et al.) and `app/eval/mtmc.py` (offline replay of caches
+  through the same hook and tracker) back `make eval` (`scripts/evaluate.py`), with `--sweep` and
+  `--no-calibration` ablations. Results go to `data/eval/<dataset>_mtmc.json`.
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D23 | Vendor OSNet instead of installing `torchreid`/`boxmot` | torchreid is a stale sdist needing compilation; boxmot pins its own detector stack. One 440-line MIT file keeps checkpoint key names |
+| D24 | OSNet x1.0 / MSMT17 by default (512-d, ~2.2 M params) | Best cross-domain generalisation in the torchreid zoo; small enough to share the GPU |
+| D25 | Global IDs are assigned once a track has 3 quality samples (≈ 0.5 s at 30 fps), shown as `t<id>` / pending before that | Avoids committing to an identity from one blurry crop |
+| D26 | Metrics report both "online" (what the operator saw, pending frames count against) and "tracklet-level" IDF1 | Honest view of the live system plus the standard MTMC number |
+| D27 | `make eval` refuses datasets without exhaustive, cross-camera GT (MEVA) | No misleading numbers (CLAUDE.md: never fabricate metrics) |
+
+### Status
+**Code complete and tested; the DoD metric is held** until SmartSpaces is available. The sandbox can't
+reach Hugging Face (data) or Google Drive (OSNet weights).
+
+Verified here:
+- IDF1 implementation: unit tests for perfect tracking, id switch, cross-camera split, FP/FN and the IoU threshold.
+- Global tracker: 8 scenario tests (cross-camera re-identification, pending until enough samples,
+  same-camera exclusivity, far-apart concurrent sightings split, same-place concurrent sightings merge
+  despite weak appearance, impossible travel speed splits, stale track expiry).
+- `make eval` end to end on a synthetic 2-camera dataset (person walks A → B): tracklet-level multi-camera
+  IDF1 = 1.0, online < 1.0 (pending frames), and a too-strict threshold splits the identity as expected.
+- OSNet loader on torchreid-style checkpoints (`state_dict` wrapper, `module.` prefix, 4101-way
+  classifier), 512-d L2-normalized output, ground projection of foot points with a known camera.
+- Engine: a moving person in a realtime file camera gets global id 1 through the full hook chain.
+
+**To produce the DoD number on the target machine:**
+```bash
+make data-smartspaces        # ~1.2 GB, needs HF access
+make index                   # tracks + OSNet samples for every cached camera (or Colab notebook)
+make eval                    # prints per-camera and multi-camera IDF1, saves data/eval/smartspaces_mtmc.json
+make eval EVAL_ARGS="--sweep match_threshold=0.45,0.55,0.65"   # tune, then set it in settings.yaml
+```

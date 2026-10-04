@@ -155,10 +155,9 @@ class CrossCameraHook:
                 continue
             live.add(t.track_id)
             q, e = samples.get(t.track_id, (0.0, None))
-            t.global_id = self.tracker.observe(
-                self.camera_id, t.track_id, ts, e, q, self.world_xy(t)
-            )
-            t.extra["world_xy"] = self.world_xy(t)
+            xy = self.world_xy(t)
+            t.extra["world_xy"] = xy
+            t.global_id = self.tracker.observe(self.camera_id, t.track_id, ts, e, q, xy)
         self.tracker.end_stale(self.camera_id, live, ts, self.grace_s)
         for tid in [k for k in self._last_sample if k not in live]:
             if result.frame.index - self._last_sample[tid] > 10 * self.cfg.sample_every:
