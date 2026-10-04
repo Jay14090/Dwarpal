@@ -594,3 +594,42 @@ Done. The tests cover each DoD item (`test_privacy.py`, `test_events_api.py`, `t
 In the browser (MEVA gym and cafe): stream heads blurred (`docs/img/p10_stream_blur.jpg`), search thumbnails
 blurred, the admin eye unblurs one card, and the audit log shows the `unblur_thumbnail` row
 (`docs/img/p10_search_blur.jpg`).
+
+## P11 Demo polish
+
+### Plan
+- `make demo` (`scripts/demo.sh`) brings up infra, migrations, a cache check per enabled camera, a dashboard
+  install/build when needed, then the API + engine and the dashboard together. It prints the URLs, and Ctrl-C
+  stops everything.
+- The `/metrics` page already shipped in P9; it reads only `data/eval/*.json`.
+- `docs/demo_script.md`: an 8-minute walkthrough (live view → webcam unknown → enroll → resident → search →
+  alerts, ack and audited unblur → metrics) plus troubleshooting.
+- README: Mermaid architecture diagram, two GIFs recorded from the running system (`docs/img/live.gif`,
+  `docs/img/search.gif`), quickstart, a feature table, measured numbers, a "waiting on you" table and licences.
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D55 | The indoor MEVA cameras G421 (cafe) and G299 (gym, restricted) are now **enabled** by default (revises D39) | The demo target is 4 replayed cameras + the webcam. Outdoor MEVA people are too small to identify, so the indoor cameras carry the identity and alert story until SmartSpaces is downloaded |
+| D56 | `make demo` serves the production dashboard build (`next start`) and rebuilds only when `frontend/src` changed | Smooth UI during the demo; the dev server recompiles on first visit to each page |
+
+### Status
+Done. `make demo` was run here: infra, migrations, the cache check (all enabled cameras ok), API (health ok) and
+dashboard (`/live` 200) came up, and Ctrl-C left no processes behind. The GIFs and screenshots come from the
+running system. Backend: 202 tests pass, and ruff is clean. Frontend: `make web-build` passes.
+
+## Where things stand (all phases)
+| Phase | State |
+|---|---|
+| P0 Setup | Done |
+| P1 Data | Done for MEVA (5 cameras). The SmartSpaces download is scripted and tested, but **held**: Hugging Face is blocked here |
+| P2 Single-camera pipeline | Done (CPU: 13 fps `yolo26n`, 8 fps `yolo26s`; GPU numbers on your machine) |
+| P3 Cross-camera IDs | Code done. **IDF1 held**: it needs SmartSpaces (MEVA ground truth is too sparse) and OSNet weights |
+| P4 Enrollment + identity | Code done. **Role accuracy and unknown-alert P/R held** (SmartSpaces); **webcam flip held** (your webcam) |
+| P5 ANPR | Code done. **Exact-plate accuracy held** (a text-labelled Indian set); **gate stream held** (your clips) |
+| P6 Attributes + indexing | Done; 20-track spot-check logged |
+| P7 NL search | Done; 18/18 parser queries, top-5 spot-check logged |
+| P8 Rules + events | Done; once per incident verified on real footage |
+| P9 Frontend | Done; all five pages verified in a browser |
+| P10 Privacy | Done; tests cover blur, unblur audit, retention and consent |
+| P11 Demo polish | Done |

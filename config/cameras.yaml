@@ -69,7 +69,7 @@ cameras:
     source_type: file
     source_uri: data/processed/meva/meva_g421.mp4
     run_mode: cached
-    enabled: false
+    enabled: true
     dataset: meva
     zones:
       - name: cafe
@@ -82,7 +82,7 @@ cameras:
     source_type: file
     source_uri: data/processed/meva/meva_g299.mp4
     run_mode: cached
-    enabled: false
+    enabled: true
     dataset: meva
     zones:
       - name: gym

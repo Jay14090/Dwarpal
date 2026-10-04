@@ -91,8 +91,8 @@ search-check: ## Parse every query in tests/search_queries.yaml and compare with
 events-replay: ## Replay cached cameras through identity + rules; checks one alert per incident
 	$(RUN) python scripts/replay_events.py $(if $(CAMERAS),--cameras $(CAMERAS)) $(REPLAY_ARGS)
 
-demo: ## (P11) Start everything for the demo
-	@echo "make demo lands in P11"; exit 1
+demo: ## Start everything for the demo: infra, API + engine, dashboard (Ctrl-C stops all)
+	./scripts/demo.sh
 
 enroll-sim: ## Simulated enrollment on SmartSpaces (15 residents, 5 staff, seed 42)
 	$(RUN) python scripts/simulate_enrollment.py --residents 15 --staff 5 --seed 42 $(ENROLL_ARGS)
