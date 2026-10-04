@@ -1,0 +1,59 @@
+# Dwarpal runtime settings. Every threshold and path lives here (CLAUDE.md section 8).
+# Env overrides: DATABASE_URL -> database.url, DWARPAL_DEVICE -> device,
+#                LLM_PROVIDER / LLM_MODEL / LLM_API_KEY -> llm.*
+
+app:
+  name: dwarpal
+  log_level: INFO
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  cors_origins: ["http://localhost:3000"]
+
+database:
+  url: postgresql+psycopg://dwarpal:dwarpal@localhost:5432/dwarpal
+  connect_timeout_s: 2
+  pool_size: 5
+
+# auto | cuda | mps | cpu. auto = CUDA, then MPS, then CPU.
+device: auto
+# FP16 inference when on CUDA (ignored on CPU/MPS). Needed to fit under 8 GB VRAM.
+half_precision: true
+
+paths:
+  data_dir: data
+  raw_dir: data/raw
+  processed_dir: data/processed
+  cache_dir: data/cache
+  thumbs_dir: data/thumbs
+  clips_dir: data/clips
+  models_dir: models
+
+streaming:
+  rtsp_base_url: rtsp://localhost:8554
+  mjpeg_max_fps: 15
+  mjpeg_jpeg_quality: 80
+
+# Identity engine (used from P4).
+identity:
+  t_face: 0.45            # cosine similarity to accept a face match
+  t_body: 0.60            # cosine similarity to accept a body Re-ID match
+  min_quality: 0.35       # crops below this quality are ignored as evidence
+  unknown_after_observations: 8   # quality observations with no match before pending -> unknown
+  face_weight: 1.0
+  body_weight: 0.5
+  staff_vest_fallback: false
+
+# Privacy (enforced from P10).
+privacy:
+  blur_unknown_faces: true
+  unknown_retention_days: 7
+  require_consent: true
+
+# Natural-language search parser (P7). Empty provider -> rule-based fallback.
+llm:
+  provider: ""
+  model: ""
+  api_key: ""
+  timeout_s: 10

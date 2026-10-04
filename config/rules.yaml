@@ -1,0 +1,40 @@
+# Alert rules (engine lands in P8). Each rule fires at most once per global ID per cooldown.
+# type: unknown_in_zone | unregistered_vehicle | loitering | after_hours | tailgating
+# zones: zone names from cameras.yaml; empty list = all restricted zones.
+
+defaults:
+  cooldown_s: 300
+
+rules:
+  - id: unknown_in_restricted_zone
+    type: unknown_in_zone
+    enabled: true
+    severity: high
+    zones: []
+
+  - id: unregistered_vehicle_at_gate
+    type: unregistered_vehicle
+    enabled: true
+    severity: medium
+
+  - id: loitering_unknown
+    type: loitering
+    enabled: true
+    severity: medium
+    zones: []
+    params:
+      min_dwell_s: 60
+
+  - id: after_hours_entry
+    type: after_hours
+    enabled: true
+    severity: high
+    zones: []
+    params:
+      start: "22:00"
+      end: "06:00"
+
+  - id: tailgating
+    type: tailgating
+    enabled: false
+    severity: medium

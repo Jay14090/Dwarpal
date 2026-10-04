@@ -1,0 +1,33 @@
+# MediaMTX config for simulated CCTV cameras. Unlisted keys keep MediaMTX defaults.
+# ffmpeg (scripts/stream_cameras.sh, P1) publishes each looped dataset video to
+# rtsp://localhost:8554/<camera_id>; the Windows-side webcam publisher uses path "webcam".
+logLevel: info
+
+# TCP only: UDP RTP port ranges don't map cleanly through Docker Desktop on Windows.
+rtspTransports: [tcp]
+rtspAddress: :8554
+
+rtmp: false
+webrtc: false
+srt: false
+moq: false
+
+hls: true
+hlsAddress: :8888
+
+api: true
+apiAddress: :9997
+
+authInternalUsers:
+  # Local demo only: anyone can publish/read. Do not expose these ports beyond localhost.
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+
+paths:
+  all_others:

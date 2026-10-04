@@ -1,0 +1,22 @@
+# Camera registry. `id` is a slug used in URLs, events and the RTSP path.
+# source_type: file | rtsp | webcam
+#   file   -> source_uri is a path to a video (looped)
+#   rtsp   -> source_uri is an RTSP URL (dataset cameras via MediaMTX, or the Windows webcam publisher)
+#   webcam -> source_uri is an OpenCV device index, e.g. "0" (native Linux only; not available in WSL2)
+# run_mode: realtime | cached (cached replays precomputed detections from `make index`)
+# Zone polygons use normalized [x, y] in [0, 1] (top-left origin).
+#
+# Dataset cameras (4 x SmartSpaces / MEVA) are added in P1 once the subsets are chosen.
+
+cameras:
+  - id: webcam
+    name: Lobby webcam
+    source_type: rtsp
+    source_uri: rtsp://localhost:8554/webcam
+    run_mode: realtime
+    enabled: true
+    zones:
+      - name: lobby
+        restricted: true
+        polygon: [[0.05, 0.05], [0.95, 0.05], [0.95, 0.95], [0.05, 0.95]]
+    calibration: null
