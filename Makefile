@@ -8,7 +8,7 @@ PORT    ?= 8000
 
 .DEFAULT_GOAL := help
 .PHONY: help setup env infra-up infra-down infra-logs migrate dev test lint fmt \
-        data data-meva data-smartspaces inspect streams streams-stop index demo eval clean
+        data data-meva data-smartspaces inspect streams streams-stop index enroll-sim demo eval clean
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
@@ -75,6 +75,9 @@ index: ## Precompute tracked detections for cached-mode cameras (or run notebook
 
 demo: ## (P11) Start everything for the demo
 	@echo "make demo lands in P11"; exit 1
+
+enroll-sim: ## Simulated enrollment on SmartSpaces (15 residents, 5 staff, seed 42)
+	$(RUN) python scripts/simulate_enrollment.py --residents 15 --staff 5 --seed 42 $(ENROLL_ARGS)
 
 eval: ## Compute metrics against ground truth (IDF1 etc.; needs SmartSpaces + make index)
 	$(RUN) python scripts/evaluate.py $(EVAL_ARGS)

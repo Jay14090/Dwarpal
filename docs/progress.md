@@ -241,3 +241,74 @@ make index                   # tracks + OSNet samples for every cached camera (o
 make eval                    # prints per-camera and multi-camera IDF1, saves data/eval/smartspaces_mtmc.json
 make eval EVAL_ARGS="--sweep match_threshold=0.45,0.55,0.65"   # tune, then set it in settings.yaml
 ```
+
+## P4 Enrollment + identity
+
+### Plan
+- `pipeline/face.py`: InsightFace **buffalo_l** (SCRFD + ArcFace 512-d) applied to the **head region of
+  person boxes ≥ 140 px tall**. Quality = det score × size ramp × frontalness (nose between the eyes).
+- `pipeline/identity.py`: `Gallery` (face/body matrices per person) and `IdentityEngine` with the state
+  machine `pending → resident|staff` (evidence ≥ `accept_score`) or `→ unknown` (after
+  `unknown_after_observations` quality samples without a match). Evidence per sample is weight × quality
+  when cosine ≥ `t_face` / `t_body`. A switch between people needs `switch_ratio` × the current evidence
+  (no flicker). On gallery change every identity's recent samples are re-scored, so **enrollment flips
+  unknown → resident immediately**.
+- `pipeline/person_hooks.py`: `FaceHook` (realtime, or cached `faces.npz` written by `make index`),
+  `IdentityHook` (role per track) and `EnrollmentCollector` (best 3-5 face/body shots of the most
+  prominent person, ≥ 0.3 s apart, plus a face thumbnail).
+- `db/gallery_store.py`: enroll/delete/list/load with **consent enforced at the storage layer**. Only
+  consenting people reach the gallery, and every enroll/delete goes to `audit_log`.
+- Engine control channel (`EngineProcess.request`): `reload_gallery`, `enroll_capture`, `embed_images`.
+  API: `POST /enroll/capture`, `POST /enroll/upload`, `GET /people`, `DELETE /people/{id}`,
+  `GET /people/{id}/thumb.jpg` (actor from the `X-Actor` header for the audit log).
+- `scripts/simulate_enrollment.py` (`make enroll-sim`): GT people clearly visible in the first 25 % of
+  the dataset → 15 residents + 5 staff (seed 42), best 8 crops each, stored in Postgres
+  (`unit = SIM:<dataset>`, replaced each run) and `processed/<dataset>/enrollment/gallery.npz`.
+- `app/eval/identity_eval.py` via `make eval`: **role-label accuracy** (decided observations, coverage and
+  confusion matrix) and **unknown-alert precision/recall** on frames after the window only (no leakage).
+
+### Decisions
+| # | Decision | Why |
+|---|---|---|
+| D28 | Face search only on person boxes ≥ 140 px tall, head region only | Cost scales with close people; CCTV-distance faces are too small to help (CLAUDE.md reality check) |
+| D29 | Unknown alerts are counted once per global identity (first `pending → unknown`) | Matches the rules-engine dedup (P8); "once per incident" |
+| D30 | Webcam enrollment captures in the engine (raw frames, real encoders) instead of from MJPEG JPEGs | MJPEG frames carry drawn boxes and lossy re-encoding |
+| D31 | Uploaded-photo enrollment: best face per photo; a photo with h/w ≥ 1.6 also adds a body sample | Portrait photos have no usable body |
+| D32 | No authentication in the demo; the `X-Actor` header names the actor in `audit_log` | Out of scope; P10 audits admin actions with it |
+
+### Status
+**Code complete and tested; the DoD numbers are held** until SmartSpaces is available (same blocker as P3).
+The live webcam flip needs the user's webcam.
+
+Verified here (102 tests):
+- Identity state machine: unknown after N unmatched samples, face match → role, quality weighting,
+  low-quality samples ignored, no flicker on one contrary sample, switch on sustained evidence,
+  **enrollment flips unknown → resident immediately**, deleting a person resets their tracks.
+- Engine integration with fakes: a person on a realtime camera becomes **unknown**, a 1.5 s capture
+  collects 3-5 face shots and ≥ 3 body shots plus a JPEG thumbnail, and after the gallery reload the same
+  live track turns **resident**.
+- API on a real migrated Postgres: consent refused before any capture, person + 8 embeddings + thumbnail
+  + audit row stored, too-few-shots hint, photo upload, audited delete, 503 without the engine, and
+  non-consenting rows never loaded into the gallery.
+- `simulate_enrollment.py` end to end on a synthetic 2-camera dataset with real video files.
+- `evaluate_identity` on the synthetic dataset: role accuracy 1.0 with one correct unknown alert per
+  unenrolled person, and it reports enrolled people wrongly alerted as unknown.
+- Live: the API → engine control channel round trip in a real engine process. The gallery loads from
+  Postgres, consent is enforced, and a capture with no usable person returns the "stand closer" hint.
+- InsightFace buffalo_l downloads and runs (SCRFD on a 320 px head region ~110 ms on CPU). There are no
+  privacy-safe face images in the sandbox (dataset faces are tiny), so face *recognition* is verified on
+  the user's webcam.
+
+**To produce the DoD numbers on the target machine:**
+```bash
+make data-smartspaces && make index     # once (P3)
+make enroll-sim                         # 15 residents + 5 staff, seed 42
+make eval                               # P3 IDF1 + P4 role accuracy and unknown precision/recall
+```
+**Live webcam check:** run `scripts/webcam_publish.ps1` on Windows, then `make dev` and open
+`http://localhost:8000/live`. Step in front of the camera (red **U** box after ~1 s), then:
+```bash
+curl -X POST localhost:8000/enroll/capture -H 'content-type: application/json' \
+  -d '{"camera_id":"webcam","role":"resident","display_name":"You","consent":true}'
+```
+Look at the camera for ~6 s; the box turns green **R** without leaving the frame.

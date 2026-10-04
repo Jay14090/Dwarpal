@@ -81,6 +81,14 @@ class StreamingSettings(StrictModel):
     mjpeg_jpeg_quality: int = Field(80, ge=10, le=100)
 
 
+class EnrollmentSettings(StrictModel):
+    window_frac: float = Field(0.25, gt=0.0, lt=1.0)
+    shots_per_person: int = Field(8, ge=1)
+    capture_seconds: float = Field(6, gt=0)
+    capture_shots: int = Field(5, ge=1)
+    min_shots: int = Field(3, ge=1)
+
+
 class IdentitySettings(StrictModel):
     t_face: float = Field(ge=-1.0, le=1.0)
     t_body: float = Field(ge=-1.0, le=1.0)
@@ -88,7 +96,23 @@ class IdentitySettings(StrictModel):
     unknown_after_observations: int = Field(ge=1)
     face_weight: float = Field(ge=0.0)
     body_weight: float = Field(ge=0.0)
+    accept_score: float = Field(1.0, gt=0.0)
+    switch_ratio: float = Field(2.0, ge=1.0)
+    recent_samples: int = Field(20, ge=1)
     staff_vest_fallback: bool = False
+    enrollment: EnrollmentSettings = EnrollmentSettings()
+
+
+class FaceSettings(StrictModel):
+    enabled: bool = True
+    model: str = "buffalo_l"
+    root: Path = Path("models/insightface")
+    det_size: int = Field(320, ge=64)
+    det_thresh: float = Field(0.5, ge=0.0, le=1.0)
+    min_person_height_px: int = Field(140, ge=0)
+    min_face_px: int = Field(24, ge=1)
+    good_face_px: int = Field(80, ge=1)
+    sample_every: int = Field(5, ge=1)
 
 
 class PrivacySettings(StrictModel):
@@ -215,6 +239,7 @@ class Settings(StrictModel):
     datasets: DatasetSettings
     pipeline: PipelineSettings
     reid: ReidSettings
+    face: FaceSettings = FaceSettings()
     global_tracker: GlobalTrackerSettings = GlobalTrackerSettings()
 
 
@@ -383,6 +408,9 @@ def load_config(
         settings_raw = _apply_env_overrides(_read_yaml(cdir / "settings.yaml"), env)
         settings = Settings.model_validate(settings_raw)
         settings = settings.model_copy(update={"paths": settings.paths.resolved(root)})
+        if not settings.face.root.is_absolute():
+            face = settings.face.model_copy(update={"root": root / settings.face.root})
+            settings = settings.model_copy(update={"face": face})
         if not settings.reid.weights.is_absolute():
             reid = settings.reid.model_copy(update={"weights": root / settings.reid.weights})
             settings = settings.model_copy(update={"reid": reid})

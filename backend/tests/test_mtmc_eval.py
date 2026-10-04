@@ -71,3 +71,44 @@ def test_missing_reid_cache_is_reported(dataset, config):
     cams = load_cameras(ddir, cache, ["A", "B"])
     with pytest.raises(FileNotFoundError, match="reid"):
         evaluate_mtmc(cams, config.settings.reid, config.settings.global_tracker)
+
+
+def test_identity_metrics_on_held_out_window(dataset, config):
+    from app.eval.identity_eval import evaluate_identity
+    from app.pipeline.identity import Gallery, GalleryPerson
+
+    ddir, cache = dataset
+    cams = load_cameras(ddir, cache, ["A", "B"])
+    s = config.settings
+    gallery = Gallery({1: GalleryPerson(1, "resident")}, {"body": [(1, PROTO[1])]})
+    res = evaluate_identity(
+        cams, s.reid, s.global_tracker, s.identity, s.face, gallery,
+        enrolled_roles={1: "resident"}, start_frame=10,
+    )  # fmt: skip
+    assert res.frames == (10, 160)
+    assert res.role_accuracy == 1.0
+    assert res.confusion["resident"].get("resident", 0) > 0
+    assert res.confusion["resident"].get("unknown", 0) == 0
+    # persons 0 (seen in A then B under one global id) and 2 are unknown: one alert each
+    assert (res.alerts, res.alerts_correct) == (2, 2)
+    assert res.unknown_precision == 1.0 and res.unknown_recall == 1.0
+    assert res.false_unknown_people == []
+
+
+def test_identity_metrics_flag_enrolled_people_alerted_as_unknown(dataset, config):
+    from app.eval.identity_eval import evaluate_identity
+    from app.pipeline.identity import Gallery, GalleryPerson
+
+    ddir, cache = dataset
+    cams = load_cameras(ddir, cache, ["A", "B"])
+    s = config.settings
+    # person 2 is "enrolled" with a wrong embedding: they end up alerted as unknown
+    gallery = Gallery({1: GalleryPerson(1, "resident"), 2: GalleryPerson(2, "staff")},
+                      {"body": [(1, PROTO[1]), (2, -PROTO[2])]})  # fmt: skip
+    res = evaluate_identity(
+        cams, s.reid, s.global_tracker, s.identity, s.face, gallery,
+        enrolled_roles={1: "resident", 2: "staff"}, start_frame=0,
+    )  # fmt: skip
+    assert res.false_unknown_people == [2]
+    assert res.unknown_precision == 0.5 and res.unknown_recall == 1.0
+    assert res.role_accuracy < 1.0

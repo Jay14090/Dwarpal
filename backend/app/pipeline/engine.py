@@ -18,10 +18,14 @@ import multiprocessing as mp
 import queue
 import threading
 import time
+import uuid
+from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
 
+import cv2
 import numpy as np
+from sqlalchemy.orm import Session
 
 from app.core.config import Camera, Config, load_config
 from app.core.device import resolve_device
@@ -31,8 +35,17 @@ from app.pipeline.annotate import Annotator
 from app.pipeline.cache import TrackCache, cache_path
 from app.pipeline.crosscam import CrossCameraHook, ReidCache, reid_cache_path
 from app.pipeline.detector import Detector, YoloDetector
+from app.pipeline.face import FaceEncoder, FaceSample, build_face_encoder
 from app.pipeline.frames import Detections
 from app.pipeline.global_tracker import GlobalTracker
+from app.pipeline.identity import Gallery, IdentityEngine
+from app.pipeline.person_hooks import (
+    EnrollmentCollector,
+    FaceHook,
+    IdentityHook,
+    SampleCache,
+    face_cache_path,
+)
 from app.pipeline.reid import ReidEncoder, build_encoder
 from app.pipeline.sources import open_source
 from app.pipeline.tracker import ByteTracker
@@ -134,6 +147,9 @@ class Engine:
         detector: Detector | None = None,
         encoder: ReidEncoder | None = None,
         global_tracker: GlobalTracker | None = None,
+        face_encoder: FaceEncoder | None = None,
+        identity: IdentityEngine | None = None,
+        gallery_loader: Callable[[], Gallery] | None = None,
     ) -> None:
         self.config = config
         s = config.settings
@@ -144,7 +160,15 @@ class Engine:
         self._detector = detector
         self._encoder: ReidEncoder | None = LockedEncoder(encoder) if encoder else None
         self._encoder_error: Exception | None = None
+        self._face: FaceEncoder | None = LockedFaceEncoder(face_encoder) if face_encoder else None
+        self._face_error: Exception | None = (
+            None if s.face.enabled else RuntimeError("face.enabled=false")
+        )
         self.global_tracker = global_tracker or GlobalTracker(s.global_tracker, s.reid.max_samples)
+        self.identity = identity or IdentityEngine(s.identity)
+        self.gallery_loader = gallery_loader
+        self.reload_gallery()
+        self.collectors: list[tuple[CameraWorker, EnrollmentCollector]] = []
         self.epoch = time.time()  # shared timeline for all file cameras
         self.workers: list[CameraWorker] = []
         for cam in cams:
@@ -180,15 +204,21 @@ class Engine:
                 )
             )  # fmt: skip
 
+    # ------------------------------------------------------------------ hooks
+
     def hooks_for(self, cam: Camera, cached: bool, fps: float) -> list[FrameHook]:
+        """CrossCameraHook (global ids) -> FaceHook -> IdentityHook (roles)."""
         s = self.config.settings
-        reid_cache = None
+        reid_cache = face_cache = None
         if cached:
             path = reid_cache_path(s.paths.cache_dir, cam.id)
             if path.is_file():
                 reid_cache = ReidCache(path)
             else:
                 log.warning("%s: no reid cache at %s; computing embeddings live", cam.id, path)
+            fpath = face_cache_path(s.paths.cache_dir, cam.id)
+            if fpath.is_file():
+                face_cache = SampleCache(fpath)
         encoder = None
         if reid_cache is None:
             encoder = self.encoder
@@ -197,12 +227,18 @@ class Engine:
                 return []
         # A local track lost for longer than the tracker keeps it is over.
         grace_s = s.pipeline.tracker.track_buffer / max(fps, 1.0) + 0.5
-        return [
+        hooks: list[FrameHook] = [
             CrossCameraHook(
                 cam.id, s.reid, self.global_tracker, encoder=encoder, cache=reid_cache,
                 calibration=load_calibration_for(cam, self.config), grace_s=grace_s,
             )
         ]  # fmt: skip
+        if face_cache is not None:
+            hooks.append(FaceHook(cam.id, s.face, cache=face_cache))
+        elif not cached and self.face_encoder is not None:
+            hooks.append(FaceHook(cam.id, s.face, encoder=self.face_encoder))
+        hooks.append(IdentityHook(self.identity))
+        return hooks
 
     @property
     def encoder(self) -> ReidEncoder | None:
@@ -218,6 +254,18 @@ class Engine:
         return self._encoder
 
     @property
+    def face_encoder(self) -> FaceEncoder | None:
+        if self._face is None and self._face_error is None:
+            s = self.config.settings
+            try:
+                enc = build_face_encoder(s.face, resolve_device(s.device))
+                self._face = LockedFaceEncoder(enc) if enc else None
+            except Exception as exc:
+                log.error("faces unavailable: %s", exc)
+                self._face_error = exc
+        return self._face
+
+    @property
     def detector(self) -> Detector:
         """Created on first use so all-cached setups never load the model."""
         if self._detector is None:
@@ -227,10 +275,65 @@ class Engine:
             self._detector = BatchingDetector(yolo, max_batch=s.pipeline.detector.batch_size)
         return self._detector
 
+    # ------------------------------------------------------------------ control
+
+    def reload_gallery(self) -> int:
+        if self.gallery_loader is None:
+            return len(self.identity.gallery)
+        try:
+            gallery = self.gallery_loader()
+        except Exception as exc:
+            log.error(
+                "gallery load failed (%s); keeping %d people", exc, len(self.identity.gallery)
+            )
+            return len(self.identity.gallery)
+        self.identity.set_gallery(gallery, time.time())
+        return len(gallery)
+
+    def start_capture(
+        self, camera_id: str, seconds: float, shots: int, on_done: Callable[[dict[str, Any]], None]
+    ) -> None:
+        worker = next((w for w in self.workers if w.camera.id == camera_id), None)
+        if worker is None:
+            on_done({"error": f"camera {camera_id} is not running"})
+            return
+        collector = EnrollmentCollector(seconds, shots, self.face_encoder, self.encoder, on_done)
+        worker.hooks = [*worker.hooks, collector]  # copy-on-write: the worker thread iterates
+        self.collectors.append((worker, collector))
+
+    def tick(self) -> None:
+        """Periodic housekeeping from the engine main loop."""
+        for worker, c in list(self.collectors):
+            c.expire()
+            if c.done:
+                worker.hooks = [h for h in worker.hooks if h is not c]
+                self.collectors.remove((worker, c))
+
+    def embed_images(self, images: list[np.ndarray]) -> dict[str, Any]:
+        """Embeddings for uploaded enrollment photos: best face per photo (+ body if the photo
+        looks like a full-body shot)."""
+        faces, fq, bodies, bq = [], [], [], []
+        for img in images:
+            h, w = img.shape[:2]
+            if self.face_encoder is not None:
+                fs = self.face_encoder.faces_for(img, [(0.0, 0.0, float(w), float(h) / 0.45)])[0]
+                if fs is not None:
+                    faces.append(fs.emb.tolist())
+                    fq.append(round(fs.quality, 3))
+            if h / max(w, 1) >= 1.6 and self.encoder is not None:
+                bodies.append(self.encoder.embed([img])[0].tolist())
+                bq.append(1.0)
+        return {"face": faces, "face_quality": fq, "body": bodies, "body_quality": bq}
+
     def stats(self) -> dict[str, Any]:
         out: dict[str, Any] = {"cameras": [w.stats() for w in self.workers], "ts": time.time()}
         if isinstance(self._detector, BatchingDetector) and self._detector.batches:
             out["detector_avg_batch"] = round(self._detector.images / self._detector.batches, 2)
+        roles: dict[str, int] = {}
+        for st in self.identity.states.values():
+            roles[st.role_state] = roles.get(st.role_state, 0) + 1
+        out["identities"] = {"global_ids": len(self.global_tracker.identities), "roles": roles,
+                             "gallery_people": len(self.identity.gallery)}  # fmt: skip
         return out
 
     def start(self) -> None:
@@ -244,6 +347,34 @@ class Engine:
             self._detector.close()
 
 
+class LockedFaceEncoder:
+    def __init__(self, inner: FaceEncoder) -> None:
+        self.inner = inner
+        self._lock = threading.Lock()
+
+    def faces_for(
+        self, image: np.ndarray, boxes: list[tuple[float, float, float, float]]
+    ) -> list[FaceSample | None]:
+        with self._lock:
+            return self.inner.faces_for(image, boxes)
+
+
+def db_gallery_loader(config: Config) -> Callable[[], Gallery]:
+    from app.db.gallery_store import load_gallery
+    from app.db.session import make_engine
+
+    db = make_engine(config.settings.database)
+    version = 0
+
+    def load() -> Gallery:
+        nonlocal version
+        version += 1
+        with Session(db) as session:
+            return load_gallery(session, version)
+
+    return load
+
+
 # --------------------------------------------------------------------------- process wrapper
 
 
@@ -252,6 +383,7 @@ def engine_main(
     camera_ids: list[str] | None,
     out_q: mp.Queue,
     stop_evt: Any,
+    ctrl_q: mp.Queue | None = None,
     stats_every_s: float = 2.0,
 ) -> None:
     """Entry point of the engine child process."""
@@ -266,16 +398,52 @@ def engine_main(
         except queue.Full:
             dropped += 1  # API side is slow: drop frames, never block inference
 
-    engine = Engine(config, publish, camera_ids)
+    def reply(req_id: str, payload: dict[str, Any]) -> None:
+        out_q.put(("result", req_id, payload), timeout=10)  # results must not be dropped
+
+    engine = Engine(config, publish, camera_ids, gallery_loader=db_gallery_loader(config))
     engine.start()
+    next_stats = time.monotonic()
     try:
-        while not stop_evt.wait(stats_every_s):
-            stats = engine.stats()
-            stats["dropped_frames"] = dropped
-            with contextlib.suppress(queue.Full):
-                out_q.put_nowait(("stats", stats))
+        while not stop_evt.is_set():
+            try:
+                msg = ctrl_q.get(timeout=0.25) if ctrl_q is not None else stop_evt.wait(0.25)
+            except queue.Empty:
+                msg = None
+            if isinstance(msg, tuple):
+                handle_command(engine, msg, reply)
+            engine.tick()
+            if time.monotonic() >= next_stats:
+                next_stats = time.monotonic() + stats_every_s
+                stats = engine.stats()
+                stats["dropped_frames"] = dropped
+                with contextlib.suppress(queue.Full):
+                    out_q.put_nowait(("stats", stats))
     finally:
         engine.stop()
+
+
+def handle_command(
+    engine: Engine, msg: tuple, reply: Callable[[str, dict[str, Any]], None]
+) -> None:
+    cmd, req_id, args = msg
+    try:
+        if cmd == "reload_gallery":
+            reply(req_id, {"people": engine.reload_gallery()})
+        elif cmd == "enroll_capture":
+            engine.start_capture(
+                args["camera_id"], args["seconds"], args["shots"], lambda r: reply(req_id, r)
+            )
+        elif cmd == "embed_images":
+            imgs = [
+                cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR) for b in args["images"]
+            ]
+            reply(req_id, engine.embed_images([i for i in imgs if i is not None]))
+        else:
+            reply(req_id, {"error": f"unknown command {cmd}"})
+    except Exception as exc:
+        log.exception("command %s failed", cmd)
+        reply(req_id, {"error": str(exc)})
 
 
 class FrameHub:
@@ -309,10 +477,12 @@ class EngineProcess:
         self.camera_ids = camera_ids
         ctx = mp.get_context("spawn")  # CUDA-safe
         self._q: mp.Queue = ctx.Queue(maxsize=config.settings.pipeline.frame_queue_size)
+        self._ctrl: mp.Queue = ctx.Queue()
         self._stop = ctx.Event()
+        self._pending: dict[str, tuple[threading.Event, list[dict[str, Any]]]] = {}
         self._proc = ctx.Process(
             target=engine_main,
-            args=(str(config.config_dir), camera_ids, self._q, self._stop),
+            args=(str(config.config_dir), camera_ids, self._q, self._stop, self._ctrl),
             name="dwarpal-engine",
             daemon=True,
         )
@@ -332,6 +502,25 @@ class EngineProcess:
                 self.hub.put(cam, jpeg, meta)
             elif msg[0] == "stats":
                 self.hub.stats = msg[1]
+            elif msg[0] == "result":
+                pending = self._pending.get(msg[1])
+                if pending is not None:
+                    pending[1].append(msg[2])
+                    pending[0].set()
+
+    def request(self, cmd: str, timeout: float, **args: Any) -> dict[str, Any]:
+        """Send a command to the engine and wait for its reply (blocking; call from a thread)."""
+        req_id = uuid.uuid4().hex
+        done = threading.Event()
+        box: list[dict[str, Any]] = []
+        self._pending[req_id] = (done, box)
+        try:
+            self._ctrl.put((cmd, req_id, args))
+            if not done.wait(timeout):
+                raise TimeoutError(f"engine did not answer {cmd} within {timeout:.0f}s")
+            return box[0]
+        finally:
+            self._pending.pop(req_id, None)
 
     @property
     def alive(self) -> bool:

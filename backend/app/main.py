@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Engine
 
 from app import __version__
-from app.api import cameras, health
+from app.api import cameras, health, people
 from app.core.config import Config, get_config
 from app.core.logging import setup_logging
 from app.db.session import make_engine
@@ -56,6 +56,7 @@ def create_app(
     )
     app.include_router(health.router)
     app.include_router(cameras.router)
+    app.include_router(people.router)
     return app
 
 

@@ -35,15 +35,37 @@ streaming:
   mjpeg_max_fps: 15
   mjpeg_jpeg_quality: 80
 
-# Identity engine (used from P4).
+# Identity engine (P4): pending -> resident/staff (gallery match) or unknown (no match).
 identity:
-  t_face: 0.45            # cosine similarity to accept a face match
-  t_body: 0.60            # cosine similarity to accept a body Re-ID match
+  t_face: 0.45            # cosine similarity to accept a face match (ArcFace)
+  t_body: 0.60            # cosine similarity to accept a body Re-ID match (OSNet)
   min_quality: 0.35       # crops below this quality are ignored as evidence
   unknown_after_observations: 8   # quality observations with no match before pending -> unknown
-  face_weight: 1.0
+  face_weight: 1.0        # evidence per matched sample = weight * crop quality
   body_weight: 0.5
+  accept_score: 1.0       # evidence needed to label a track with an enrolled person's role
+  switch_ratio: 2.0       # another person's evidence must exceed the current one by this factor
+  recent_samples: 20      # embeddings kept per identity to re-score after enrollment changes
   staff_vest_fallback: false
+  enrollment:
+    window_frac: 0.25     # simulated enrollment uses the first 25% of a dataset's frames
+    shots_per_person: 8   # best crops stored per simulated person
+    capture_seconds: 6    # webcam enrollment capture window
+    capture_shots: 5      # webcam enrollment keeps this many best shots (3-5 per spec)
+    min_shots: 3
+
+# Faces (P4): InsightFace buffalo_l (SCRFD detector + ArcFace 512-d). Weights are licensed for
+# non-commercial research use only.
+face:
+  enabled: true
+  model: buffalo_l
+  root: models/insightface
+  det_size: 320           # detector input for the head region of a person crop
+  det_thresh: 0.5
+  min_person_height_px: 140   # skip face search on smaller people (CCTV distance)
+  min_face_px: 24
+  good_face_px: 80        # faces this tall or more get full size quality
+  sample_every: 5
 
 # Privacy (enforced from P10).
 privacy:

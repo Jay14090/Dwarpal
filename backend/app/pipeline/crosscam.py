@@ -155,6 +155,8 @@ class CrossCameraHook:
                 continue
             live.add(t.track_id)
             q, e = samples.get(t.track_id, (0.0, None))
+            if e is not None:
+                t.extra["body_sample"] = (q, e)
             xy = self.world_xy(t)
             t.extra["world_xy"] = xy
             t.global_id = self.tracker.observe(self.camera_id, t.track_id, ts, e, q, xy)

@@ -17,12 +17,14 @@ import sys
 import time
 from pathlib import Path
 
-from app.core.config import ReidSettings, get_config
+from app.core.config import FaceSettings, ReidSettings, get_config
 from app.core.device import resolve_device
 from app.pipeline.cache import TrackCacheWriter, cache_path
 from app.pipeline.crosscam import CrossCameraHook, ReidCacheWriter, reid_cache_path
 from app.pipeline.detector import YoloDetector
+from app.pipeline.face import FaceEncoder, build_face_encoder
 from app.pipeline.frames import FrameResult
+from app.pipeline.person_hooks import FaceHook, face_cache_path
 from app.pipeline.reid import ReidEncoder, build_encoder
 from app.pipeline.sources import VideoFileSource
 from app.pipeline.tracker import ByteTracker
@@ -32,7 +34,8 @@ log = logging.getLogger("index")
 
 def index_camera(camera_id: str, video: Path, detector: YoloDetector, out: Path,
                  batch: int, max_frames: int | None, tracker: ByteTracker,
-                 encoder: ReidEncoder | None = None, reid_cfg: ReidSettings | None = None) -> dict:  # fmt: skip
+                 encoder: ReidEncoder | None = None, reid_cfg: ReidSettings | None = None,
+                 face_encoder: FaceEncoder | None = None, face_cfg: FaceSettings | None = None) -> dict:  # fmt: skip
     src = VideoFileSource(camera_id, video, loop=False, paced=False)
     total = min(src.num_frames, max_frames) if max_frames else src.num_frames
     writer = TrackCacheWriter(detector.labels)
@@ -40,6 +43,10 @@ def index_camera(camera_id: str, video: Path, detector: YoloDetector, out: Path,
     hook = None
     if encoder is not None and reid_cfg is not None:
         hook = CrossCameraHook(camera_id, reid_cfg, None, encoder=encoder, recorder=reid_writer)
+    face_writer = ReidCacheWriter()  # same (frame, track, quality, emb) layout
+    face_hook = None
+    if face_encoder is not None and face_cfg is not None:
+        face_hook = FaceHook(camera_id, face_cfg, encoder=face_encoder, recorder=face_writer)
     t0 = time.perf_counter()
     done = 0
     infer_s = 0.0
@@ -58,8 +65,11 @@ def index_camera(camera_id: str, video: Path, detector: YoloDetector, out: Path,
         for f, d in zip(frames, dets, strict=True):
             tracks = tracker.update(d, f.image)
             writer.add(f.index, tracks)
+            result = FrameResult(f, tracks)
             if hook is not None:
-                hook(FrameResult(f, tracks))
+                hook(result)
+            if face_hook is not None:
+                face_hook(result)
         done += len(frames)
         if done % (batch * 50) < batch:
             el = time.perf_counter() - t0
@@ -83,6 +93,11 @@ def index_camera(camera_id: str, video: Path, detector: YoloDetector, out: Path,
                      "samples": len(reid_writer.rows)}  # fmt: skip
         reid_writer.save(reid_cache_path(out.parent.parent, camera_id), reid_meta)
         meta["reid_samples"] = len(reid_writer.rows)
+    if face_hook is not None:
+        face_writer.save(
+            face_cache_path(out.parent.parent, camera_id), {**meta, "face_model": face_cfg.model}
+        )
+        meta["face_samples"] = len(face_writer.rows)
     return meta
 
 
@@ -93,6 +108,8 @@ def main() -> int:
     parser.add_argument("--batch", type=int, help="frames per forward pass")
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--no-reid", action="store_true", help="skip Re-ID embeddings")
+    parser.add_argument("--no-faces", action="store_true", help="skip face samples")
+    parser.add_argument("--cache-dir", type=Path, help="write here instead of paths.cache_dir (smoke tests)")
     parser.add_argument(
         "--reid-backend", choices=["osnet", "colorhist"], help="override reid.backend"
     )
@@ -122,14 +139,16 @@ def main() -> int:
     )
     if not args.no_reid:
         encoder = build_encoder(reid_cfg, device, s.half_precision)
+    face_encoder = None if args.no_faces else build_face_encoder(s.face, device)
     for cam in cams:
         video = Path(cam.source_uri)
         video = video if video.is_absolute() else config.root_dir / video
         tracker = ByteTracker(s.pipeline.tracker, s.pipeline.min_box_height_px)
-        out = cache_path(s.paths.cache_dir, cam.id)
+        out = cache_path(args.cache_dir or s.paths.cache_dir, cam.id)
         meta = index_camera(
-            cam.id, video, detector, out, batch, args.max_frames, tracker, encoder, reid_cfg
-        )
+            cam.id, video, detector, out, batch, args.max_frames, tracker,
+            encoder, reid_cfg, face_encoder, s.face,
+        )  # fmt: skip
         log.info("%s: wrote %s  (%d frames, %.1f fps end-to-end, detector %.1f fps on %s)",
                  cam.id, out, meta["num_frames"], meta["index_fps"], meta["detect_fps"] or 0, device)  # fmt: skip
     return 0

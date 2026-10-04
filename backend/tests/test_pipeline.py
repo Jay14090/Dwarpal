@@ -157,6 +157,16 @@ def test_track_cache_roundtrip(tmp_path):
 # ------------------------------------------------------------------ worker / engine
 
 
+def engine_config(config, cams):
+    """Config with only `cams` and faces off (tests don't need the InsightFace model)."""
+    s = config.settings.model_copy(
+        update={"face": config.settings.face.model_copy(update={"enabled": False})}
+    )
+    return config.model_copy(
+        update={"settings": s, "cameras": config.cameras.model_copy(update={"cameras": cams})}
+    )
+
+
 def camera(video: Path, mode: str = "realtime") -> Camera:
     return Camera(id="cam1", name="Cam", source_type="file", source_uri=str(video), run_mode=mode)
 
@@ -221,9 +231,7 @@ def test_batching_detector_groups_concurrent_requests():
 
 def test_engine_runs_realtime_file_camera(tmp_path, config):
     video = write_video(tmp_path / "v.mp4", n=30)
-    cfg = config.model_copy(
-        update={"cameras": config.cameras.model_copy(update={"cameras": [camera(video)]})}
-    )
+    cfg = engine_config(config, [camera(video)])
     got: list[dict] = []
     eng = Engine(
         cfg, lambda c, j, m: got.append(m), detector=BrightBoxDetector(), encoder=ColorHistEncoder()
@@ -247,9 +255,7 @@ def test_engine_runs_realtime_file_camera(tmp_path, config):
 
 def test_engine_falls_back_to_realtime_without_cache(tmp_path, config):
     video = write_video(tmp_path / "v.mp4", n=5)
-    cfg = config.model_copy(
-        update={"cameras": config.cameras.model_copy(update={"cameras": [camera(video, "cached")]})}
-    )
+    cfg = engine_config(config, [camera(video, "cached")])
     eng = Engine(cfg, lambda *a: None, detector=BrightBoxDetector(), encoder=ColorHistEncoder())
     assert eng.workers[0].mode == "realtime"
 
