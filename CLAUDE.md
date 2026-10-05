@@ -182,10 +182,18 @@ Work strictly phase by phase. At the end of each phase: run tests, update `docs/
 - Do not touch real people's data beyond the datasets listed and the user's webcam/own clips.
 - If a decision is not covered here and changes scope, ask me first. Otherwise decide, note it in `docs/progress.md`, and keep moving.
 
-Start now: ask me for OS and GPU, then begin P0.
+Status: all phases are built (see section 10). Do not restart P0.
 
 ## 9. Recorded answers (do not ask again)
 
 - Target machine: **Windows 11 + WSL2** (Ubuntu), Docker Desktop with the WSL2 backend.
 - GPU: **NVIDIA, under 8 GB VRAM**. Defaults: `device: auto` (resolves to CUDA), FP16, small YOLO weights, dataset cameras in **cached** mode, webcam in **realtime**.
 - See `docs/progress.md` for every decision taken since.
+
+## 10. Current state (read before doing anything)
+
+- All phases P0–P11 are implemented on branch `claude/sleepy-ptolemy-2xcbeh`; tests and builds are green.
+- They were built in a cloud sandbox without GPU, Hugging Face, Google Drive or a webcam, so the headline
+  metrics (IDF1, role accuracy, unknown-alert P/R, plate accuracy) and the live webcam flip are still unmeasured.
+- **Next work = `docs/handoff.md` → "Do these in order"**: run each step on this machine, fix what breaks,
+  record real numbers in `docs/progress.md`, commit per step. Ask the user only for things only they can provide.
